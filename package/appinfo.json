@@ -1,0 +1,12 @@
+{
+    "id": "org.webosarchive.screenshare",
+    "version": "1.0.0",
+    "vendor": "webOS Archive",
+    "type": "pdk",
+    "main": "screenshare",
+    "title": "Screen Share",
+    "icon": "icon.png",
+    "miniicon": "icon.png",
+    "uiRevision": 2,
+    "requiredMemory": 16
+}

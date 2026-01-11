@@ -1,0 +1,21 @@
+# Build artifacts
+fbcapture
+fbcapture.o
+*.ipk
+
+# Package artifacts
+package/fbcapture
+
+# Test files
+screen_test.jpg
+/tmp/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
