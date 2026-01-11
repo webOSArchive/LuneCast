@@ -1,7 +1,6 @@
 # Build artifacts
 fbcapture
 fbcapture.o
-*.ipk
 
 # Package artifacts
 package/fbcapture
