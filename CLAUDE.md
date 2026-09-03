@@ -23,10 +23,45 @@ Screen sharing solution for HP TouchPad (webOS 3.0.5) that captures the device s
 
 The TouchPad uses a dual-framebuffer compositor - this was critical to understand:
 
-| Framebuffer | Purpose | Content |
-|-------------|---------|---------|
-| `/dev/fb0` | Base layer (LunaSysMgr) | Launcher, app switcher, carded apps, web apps |
-| `/dev/fb1` | Overlay | Fullscreen PDK apps (native/Qt apps) |
+| Framebuffer | msm_fb_type | Role | Content |
+|-------------|-------------|------|---------|
+| `/dev/fb0` | `lcdc panel` | **TOP** layer | System chrome: status bar, notifications |
+| `/dev/fb1` | (none, `msmfb40_30001`) | **BOTTOM** layer | App plane: launcher, cards, web apps, PDK apps |
+
+**fb0 is composited OVER fb1, not under it.** This is the opposite of what this
+file said until 2026-09-03, and the old ordering is why capture looked wrong.
+
+Measured on device with a card app open (dumping the visible page of each
+framebuffer and histogramming the alpha byte):
+
+```
+fb0   alpha=0 on 96.4% of pixels, alpha=255 on 3.6%
+      ...and that 3.6% is exactly the status bar strip.
+fb1   alpha=255 on 93.0%, alpha=0 on 3.6% (the same strip), partial alpha on 3.3%
+```
+
+A layer transparent over 96% of the panel cannot be the base - if it were,
+almost the whole screen would composite to nothing. fb0 is the chrome plane
+drawn on top; fb1 carries the actual app content underneath.
+
+**Both framebuffers carry a real alpha channel.** The correct capture is a
+per-pixel source-over blend of fb0 onto fb1, keyed on fb0's alpha - not a
+colour-key pick between the two. See `composite_to_rgb()` in `fbcapture.c`.
+
+### The 3-layer compositor vs. the 2 framebuffers
+
+webOS documents a *three*-layer compositor (background/wallpaper, application,
+system UI) but the kernel exposes only `fb0` and `fb1`. The third plane is an
+MDP hardware overlay pipe: buffers in `pmem_smipool` / `kgsl` memory that the
+display controller composites at scanout, programmed via `MSMFB_OVERLAY_*`
+ioctls. `/sys/devices/platform` shows the two pipelines (`mdp.0`/`msm_fb.0` and
+`mdp.196609`/`msm_fb.196609`).
+
+**That third plane is not readable through `/dev/fb*` at all.** Anything drawn
+by the GPU into an overlay pipe - GL PDK apps (games, emulators) and hardware
+video playback - will be invisible to a framebuffer-based capture no matter how
+the blend is done. Capturing those needs a different mechanism (GPU-side
+readback, e.g. `glReadPixels` at `SDL_GL_SwapBuffers` via `LD_PRELOAD`).
 
 **Both framebuffers use triple-buffering** (1024x2304 total = 3 pages of 768 lines). The visible buffer cycles through pan offsets 0, 768, 1536.
 

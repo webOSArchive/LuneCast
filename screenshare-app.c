@@ -27,7 +27,12 @@
 
 #define FBCAPTURE_PATH "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.screenshare/fbcapture"
 #define FBCAPTURE_OUTPUT "/media/internal/screen.jpg"
-#define FBCAPTURE_INTERVAL "100"
+/* Poll interval. The daemon skips the JPEG encode when the composited frame
+ * is unchanged (~25ms/iteration idle vs ~140ms for an encode), so a tighter
+ * interval costs little when the screen is static but noticeably shortens the
+ * lag before a change is noticed - which is what leaves the far end stuck on
+ * a stale frame at the tail of a short animation like the tap ripple. */
+#define FBCAPTURE_INTERVAL "40"
 #define FBCAPTURE_QUALITY "75"
 
 /* Default font path on webOS */

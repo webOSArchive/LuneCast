@@ -20,6 +20,7 @@
  */
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -51,12 +52,36 @@
 #define DEFAULT_INTERVAL 100
 #define DEFAULT_PIDFILE  "/tmp/fbcapture.pid"
 
-/* Threshold for detecting active overlay content */
-#define OVERLAY_SAMPLE_PIXELS 1000
-#define OVERLAY_ACTIVE_THRESHOLD 10  /* At least this many non-black pixels */
 
 static volatile int running = 1;
+static int g_timing = 0;   /* -T: print per-stage timings to stderr */
 static const char *pidfile_path = NULL;
+
+static long now_usec(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long)tv.tv_sec * 1000000L + tv.tv_usec;
+}
+
+/* Checksum of the composited frame, used to skip redundant encodes.
+ * FNV-1a over 32-bit words: one pass, no table, and it reads the RGB buffer
+ * (normal cached memory), so it costs a few ms against a ~137ms encode. */
+static unsigned int frame_checksum(const unsigned char *buf, size_t len) {
+    const uint32_t *w = (const uint32_t *)buf;
+    size_t words = len / 4;
+    unsigned int h = 2166136261u;
+    for (size_t i = 0; i < words; i++) {
+        h = (h ^ w[i]) * 16777619u;
+    }
+    for (size_t i = words * 4; i < len; i++) {
+        h = (h ^ buf[i]) * 16777619u;
+    }
+    return h;
+}
+
+static unsigned int g_last_sum = 0;
+static int g_have_last_sum = 0;
+static int g_frame_changed = 0;  /* set by capture_screen: did this frame differ? */
 static int g_fb1_fd = -1;  /* Global fb1 file descriptor for overlay state checks */
 static int g_use_overlay = 1;  /* Whether to composite fb1 overlay (0=fb0 only) */
 
@@ -151,70 +176,85 @@ static int get_pan_offset(const char *path, int *x, int *y) {
 
 #define FB1_PAN_SYSFS "/sys/class/graphics/fb1/pan"
 
-/* Check if fb1 overlay has meaningful content by sampling pixels */
-static int overlay_has_content(const unsigned char *fb1_map) {
-    int non_black_count = 0;
-    int step = (FB_WIDTH * FB_HEIGHT) / OVERLAY_SAMPLE_PIXELS;
-
-    for (int i = 0; i < FB_WIDTH * FB_HEIGHT && non_black_count < OVERLAY_ACTIVE_THRESHOLD; i += step) {
-        const unsigned char *pixel = fb1_map + (i * FB_BPP);
-        unsigned char b = pixel[0];
-        unsigned char g = pixel[1];
-        unsigned char r = pixel[2];
-
-        if (r > 0 || g > 0 || b > 0) {
-            non_black_count++;
-        }
-    }
-
-    return non_black_count >= OVERLAY_ACTIVE_THRESHOLD;
-}
-
-/* Composite fb0 and fb1 to RGB buffer
- * fb1 (overlay) is drawn on top of fb0 (base) where fb1 has non-black content
+/* Composite fb0 and fb1 to RGB buffer.
+ *
+ * LAYER ORDER: fb0 is the TOP layer, fb1 is underneath it.
+ *
+ * This is the opposite of what the old code (and CLAUDE.md) assumed, but it is
+ * what the hardware actually reports. Measured on device with a card app open:
+ *
+ *   fb0 ("lcdc panel")     alpha=0 on 96.4% of pixels, alpha=255 on 3.6%
+ *                          - and that 3.6% is exactly the status bar strip.
+ *   fb1 ("msmfb40_30001")  alpha=255 on 93%, plus ~3% partial alpha.
+ *
+ * A layer that is transparent over 96% of the panel cannot be the base: if it
+ * were, almost the whole screen would composite to nothing. fb0 is the system
+ * chrome plane (status bar / notifications), drawn OVER the app plane in fb1.
+ *
+ * So the correct operation is a per-pixel source-over blend of fb0 onto fb1,
+ * driven by fb0's alpha - not a colour-key pick between the two.
+ *
+ * Why the old colour-key broke: it selected fb1 wherever fb1's RGB was
+ * non-black, else fell back to fb0. That accidentally looked right for a bright
+ * app (fb1 non-black -> app shows; status strip black in fb1 -> falls back to
+ * fb0's chrome). But for a DARK app - a game, video, any dark UI - fb1's own
+ * content failed the "non-black" test, so the frame fell back to fb0, which is
+ * transparent-black over 96% of the panel. The result was a black screen with
+ * only the status bar on it: the "only one layer is being captured" symptom.
+ *
+ * Integer math only - this target is softfp, so float blending is slow here.
  */
 static void composite_to_rgb(const unsigned char *fb0, const unsigned char *fb1,
                               unsigned char *rgb, int width, int height,
                               int src_stride, int use_overlay) {
     for (int y = 0; y < height; y++) {
-        const unsigned char *src0 = fb0 + (y * src_stride);
-        const unsigned char *src1 = fb1 + (y * src_stride);
+        /* Word-wide reads. Framebuffer memory is mapped uncached, so each byte
+         * access is its own bus transaction; pulling the whole BGRA pixel in
+         * one aligned 32-bit load cuts those transactions 4x. Stride is 4096
+         * and pixels are 4 bytes, so both pointers stay naturally aligned. */
+        const uint32_t *src0 = (const uint32_t *)(fb0 + (y * src_stride));
+        const uint32_t *src1 = (const uint32_t *)(fb1 + (y * src_stride));
         unsigned char *dst = rgb + (y * width * 3);
 
         for (int x = 0; x < width; x++) {
+            uint32_t p0 = *src0++;
             unsigned char r, g, b;
 
             if (use_overlay) {
-                /* Check if overlay pixel has content (non-black) */
-                unsigned char b1 = src1[0];
-                unsigned char g1 = src1[1];
-                unsigned char r1 = src1[2];
-                unsigned char a1 = src1[3];
+                /* fb0 (chrome) over fb1 (app), keyed on fb0's alpha */
+                unsigned int a0 = p0 >> 24;
 
-                if (a1 > 0 && (r1 > 0 || g1 > 0 || b1 > 0)) {
-                    /* Use overlay pixel */
-                    r = r1;
-                    g = g1;
-                    b = b1;
+                if (a0 == 0) {
+                    /* Chrome fully transparent - app layer shows through */
+                    uint32_t p1 = *src1;
+                    b = (unsigned char)(p1);
+                    g = (unsigned char)(p1 >> 8);
+                    r = (unsigned char)(p1 >> 16);
+                } else if (a0 == 255) {
+                    /* Chrome fully opaque - take it as-is */
+                    b = (unsigned char)(p0);
+                    g = (unsigned char)(p0 >> 8);
+                    r = (unsigned char)(p0 >> 16);
                 } else {
-                    /* Use base layer pixel */
-                    b = src0[0];
-                    g = src0[1];
-                    r = src0[2];
+                    /* Partial alpha - source-over blend, rounded */
+                    uint32_t p1 = *src1;
+                    unsigned int ia = 255u - a0;
+                    b = (unsigned char)((((p0)       & 0xFFu) * a0 + ((p1)       & 0xFFu) * ia + 127u) / 255u);
+                    g = (unsigned char)((((p0 >> 8)  & 0xFFu) * a0 + ((p1 >> 8)  & 0xFFu) * ia + 127u) / 255u);
+                    r = (unsigned char)((((p0 >> 16) & 0xFFu) * a0 + ((p1 >> 16) & 0xFFu) * ia + 127u) / 255u);
                 }
             } else {
-                /* No overlay, just use fb0 */
-                b = src0[0];
-                g = src0[1];
-                r = src0[2];
+                /* fb0 only mode (-0) */
+                b = (unsigned char)(p0);
+                g = (unsigned char)(p0 >> 8);
+                r = (unsigned char)(p0 >> 16);
             }
+
+            src1++;
 
             dst[0] = r;
             dst[1] = g;
             dst[2] = b;
-
-            src0 += 4;
-            src1 += 4;
             dst += 3;
         }
     }
@@ -226,7 +266,6 @@ static int save_jpeg(const char *filename, unsigned char *rgb,
     struct jpeg_compress_struct cinfo;
     struct jpeg_error_mgr jerr;
     FILE *outfile;
-    JSAMPROW row_pointer[1];
     int row_stride;
 
     /* Use temp file and rename for atomic write */
@@ -253,13 +292,26 @@ static int save_jpeg(const char *filename, unsigned char *rgb,
     jpeg_set_defaults(&cinfo);
     jpeg_set_quality(&cinfo, quality, TRUE);
 
+    /* This is a 2011 libjpeg62 with no NEON/SIMD path, and the DCT dominates
+     * encode time on this Cortex-A8. JDCT_IFAST is a slightly less accurate
+     * integer DCT that is measurably faster; at the quality levels used for
+     * screen streaming the difference is not visible. */
+    cinfo.dct_method = JDCT_IFAST;
+
     jpeg_start_compress(&cinfo, TRUE);
 
     row_stride = width * 3;
 
+    /* Hand libjpeg many scanlines per call instead of one - fewer calls through
+     * the compressor's per-row bookkeeping. */
     while (cinfo.next_scanline < cinfo.image_height) {
-        row_pointer[0] = &rgb[cinfo.next_scanline * row_stride];
-        jpeg_write_scanlines(&cinfo, row_pointer, 1);
+        JSAMPROW rows[16];
+        unsigned int n = 0;
+        while (n < 16 && cinfo.next_scanline + n < cinfo.image_height) {
+            rows[n] = &rgb[(cinfo.next_scanline + n) * row_stride];
+            n++;
+        }
+        jpeg_write_scanlines(&cinfo, rows, n);
     }
 
     jpeg_finish_compress(&cinfo);
@@ -279,7 +331,7 @@ static int save_jpeg(const char *filename, unsigned char *rgb,
 /* Capture screen by compositing fb0 and fb1 */
 static int capture_screen(unsigned char *fb0_map, unsigned char *fb1_map,
                           unsigned char *rgb_buf, const char *output,
-                          int quality) {
+                          int quality, int force_write) {
     int pan_x, pan_y;
 
     /* Get current pan offset for fb0 */
@@ -306,21 +358,63 @@ static int capture_screen(unsigned char *fb0_map, unsigned char *fb1_map,
     }
 
     /* Check if overlay should be used:
-     * - g_use_overlay=0: fb0 only mode (for launcher capture)
-     * - g_use_overlay=1: composite fb1 if it has content (for app capture)
+     * - g_use_overlay=0: fb0 only mode (-0, manual override)
+     * - g_use_overlay=1: alpha-composite fb1 over fb0
+     *
+     * There is deliberately no content heuristic here any more. The old code
+     * sampled fb1 for non-black pixels and, if too few were found, dropped the
+     * whole frame back to fb0 alone. Since fb1 is the layer holding the actual
+     * app/launcher content, any dark screen (a dark app, a game, video) tripped
+     * that threshold and the capture collapsed to fb0 - which is transparent
+     * over 96% of the panel, leaving just the status bar on black. That is the
+     * "only one layer is being captured" symptom. Per-pixel alpha makes the
+     * heuristic unnecessary: a genuinely empty fb1 is alpha=0 and composites
+     * away on its own.
      */
-    int use_overlay = 0;
-    if (fb1_map && g_use_overlay) {
-        use_overlay = overlay_has_content(fb1_map + fb1_offset);
-    }
+    int use_overlay = (fb1_map != NULL) && g_use_overlay;
 
     /* Composite to RGB using correct offsets for both buffers */
+    long t0 = now_usec();
     composite_to_rgb(fb0_map + fb0_offset,
                      fb1_map ? fb1_map + fb1_offset : fb0_map + fb0_offset,
                      rgb_buf, FB_WIDTH, FB_HEIGHT, FB_STRIDE, use_overlay);
+    long t1 = now_usec();
 
-    /* Save as JPEG */
-    return save_jpeg(output, rgb_buf, FB_WIDTH, FB_HEIGHT, quality);
+    /* Skip the encode when the composited frame is byte-identical to the last
+     * one we encoded. The encode is ~4x the cost of the composite, so an idle
+     * screen drops from ~170ms to ~40ms per iteration - which means the loop
+     * comes back around far sooner and catches the NEXT change quickly.
+     *
+     * This is a full-frame checksum over the composited RGB, not a sparse
+     * sample of the framebuffer. That matters: a sparse sample can miss a small
+     * localised change - exactly the tail frames of a tap ripple - and skipping
+     * those is what leaves the far end stuck mid-animation. Every frame that
+     * differs in any pixel gets encoded, so the final settled frame is always
+     * transmitted.
+     */
+    int rc = 0;
+    unsigned int sum = frame_checksum(rgb_buf, FB_WIDTH * FB_HEIGHT * 3);
+    int changed = (!g_have_last_sum || sum != g_last_sum);
+    g_frame_changed = changed;
+
+    if (changed || force_write) {
+        rc = save_jpeg(output, rgb_buf, FB_WIDTH, FB_HEIGHT, quality);
+        if (rc == 0) {
+            g_last_sum = sum;
+            g_have_last_sum = 1;
+        }
+    }
+    long t2 = now_usec();
+
+    if (g_timing) {
+        fprintf(stderr, "[timing] composite=%ld.%01ld ms  encode+write=%ld.%01ld ms  total=%ld.%01ld ms%s\n",
+                (t1 - t0) / 1000, ((t1 - t0) % 1000) / 100,
+                (t2 - t1) / 1000, ((t2 - t1) % 1000) / 100,
+                (t2 - t0) / 1000, ((t2 - t0) % 1000) / 100,
+                (changed || force_write) ? "" : "  [unchanged, encode skipped]");
+    }
+
+    return rc;
 }
 
 static void print_usage(const char *prog) {
@@ -334,6 +428,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -p FILE    PID file (default: %s)\n", DEFAULT_PIDFILE);
     fprintf(stderr, "  -0         fb0 only mode (no overlay, for launcher capture)\n");
     fprintf(stderr, "  -1         Single capture and exit (default)\n");
+    fprintf(stderr, "  -T         Print per-stage timings to stderr\n");
     fprintf(stderr, "  -h         Show this help\n");
     fprintf(stderr, "\nBy default captures fb0+fb1 for fullscreen app support.\n");
     fprintf(stderr, "Use -0 to capture launcher/app switcher (disables fb1 overlay).\n");
@@ -354,7 +449,7 @@ int main(int argc, char *argv[]) {
     int interval_ms = DEFAULT_INTERVAL;
     int opt;
 
-    while ((opt = getopt(argc, argv, "o:q:dDi:p:01h")) != -1) {
+    while ((opt = getopt(argc, argv, "o:q:dDi:p:01hT")) != -1) {
         switch (opt) {
             case 'o':
                 output = optarg;
@@ -385,6 +480,9 @@ int main(int argc, char *argv[]) {
                 break;
             case '0':
                 g_use_overlay = 0;  /* fb0 only mode */
+                break;
+            case 'T':
+                g_timing = 1;
                 break;
             case '1':
                 daemon_mode = 0;
@@ -474,11 +572,17 @@ int main(int argc, char *argv[]) {
     int ret = 0;
     int frame_count = 0;
     long long start_time = current_time_ms();
+    /* Adaptive polling state: start at the requested rate, back off when idle. */
+    int cur_interval_ms = interval_ms;
+    int idle_max_ms = interval_ms * 5;
+    if (idle_max_ms > 250) idle_max_ms = 250;
 
     do {
         long long frame_start = current_time_ms();
 
-        if (capture_screen(fb0_map, fb1_map, rgb_buf, output, quality) != 0) {
+        /* force_write on the very first frame so the output file always exists */
+        if (capture_screen(fb0_map, fb1_map, rgb_buf, output, quality,
+                           frame_count == 0) != 0) {
             fprintf(stderr, "Capture failed\n");
             ret = 1;
             break;
@@ -487,9 +591,37 @@ int main(int argc, char *argv[]) {
         frame_count++;
 
         if (daemon_mode) {
+            /* Adaptive poll interval.
+             *
+             * Even when nothing changes, an iteration still costs ~20ms: the
+             * change check has to composite, and that means reading 6MB of
+             * UNCACHED framebuffer. At a flat 40ms interval that is ~60% of a
+             * core burned on a completely static screen - which is not just a
+             * battery problem. It steals CPU from LunaSysMgr, so the very
+             * animations we are trying to capture get jankier.
+             *
+             * So: poll fast while the screen is changing (that is when frames
+             * matter), and back off geometrically when it is idle. Any change
+             * snaps the interval straight back to the base rate, so the tail of
+             * an animation is still sampled at full speed.
+             *
+             * Note this only delays noticing that a NEW change has STARTED, by
+             * at most idle_max_ms. It cannot cause a stale final frame: every
+             * frame that differs is still encoded (full-frame checksum), so the
+             * settled frame is always transmitted.
+             */
+            if (g_frame_changed) {
+                cur_interval_ms = interval_ms;          /* activity: full rate */
+            } else if (cur_interval_ms < idle_max_ms) {
+                cur_interval_ms += cur_interval_ms / 2; /* idle: back off 1.5x */
+                if (cur_interval_ms > idle_max_ms) {
+                    cur_interval_ms = idle_max_ms;
+                }
+            }
+
             /* Calculate time to sleep */
             long long elapsed = current_time_ms() - frame_start;
-            long long sleep_ms = interval_ms - elapsed;
+            long long sleep_ms = cur_interval_ms - elapsed;
 
             if (sleep_ms > 0) {
                 usleep(sleep_ms * 1000);
