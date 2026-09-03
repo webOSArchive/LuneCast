@@ -146,22 +146,33 @@ def stream_fetcher(quality: int, interval_ms: int, fast_dct: bool = False):
             pass
 
 
-def send_tap(x: int, y: int) -> bool:
+def send_input(kind: str, x: int, y: int, x2: int = 0, y2: int = 0, ms: int = 0) -> bool:
     """Forward a tap to the device.
 
     lunecast-input sends the touch straight to the socket LunaSysMgr binds -
     no system modification, and it lives in the app directory so it goes away
     with palm-uninstall.
 
-    Spawns a short novacom run per tap. novacom is nominally single-session and
-    the frame stream holds one open, so this contends briefly - acceptable at
-    human click rates, but it should move onto the existing stream pipe
-    (fbcapture reading stdin) before drags, which are a burst of events.
+    One novacom run per GESTURE, not per event: the helper generates a drag's
+    intermediate moves on-device at the panel's own 10ms cadence. Streaming
+    those from here would contend with the frame stream and put the timing at
+    the mercy of USB latency, which matters because LunaSysMgr derives flick
+    velocity from the event timestamps.
     """
     try:
-        r = subprocess.run(
-            ["novacom", "run", f"file://{DEVICE_INPUT}", "--", str(x), str(y)],
-            capture_output=True, timeout=5)
+        argv = ["novacom", "run", f"file://{DEVICE_INPUT}", "--"]
+        if kind == 'drag':
+            argv += ["drag", str(x), str(y), str(x2), str(y2)]
+            if ms:
+                argv.append(str(ms))
+        elif kind == 'hold':
+            argv += ["hold", str(x), str(y)]
+            if ms:
+                argv.append(str(ms))
+        else:
+            argv += ["tap", str(x), str(y)]
+        # A drag runs for its full duration on-device, so allow for it.
+        r = subprocess.run(argv, capture_output=True, timeout=15)
         return r.returncode == 0
     except Exception:
         return False
@@ -243,15 +254,24 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
             body = self.rfile.read(n) if n else b'{}'
             import json as _json
             d = _json.loads(body.decode('utf-8'))
+            kind = d.get('type', 'tap')
             x, y = int(d['x']), int(d['y'])
+            x2 = int(d.get('x2', 0))
+            y2 = int(d.get('y2', 0))
+            ms = int(d.get('ms', 0))
         except Exception:
+            self.send_error(400)
+            return
+        if kind not in ('tap', 'hold', 'drag'):
             self.send_error(400)
             return
         # Clamp to the panel: a click on the letterboxed edge of a scaled
         # image can round just outside 1024x768.
-        x = max(0, min(1023, x))
-        y = max(0, min(767, y))
-        ok = send_tap(x, y)
+        clamp = lambda v, hi: max(0, min(hi, v))
+        x, y = clamp(x, 1023), clamp(y, 767)
+        x2, y2 = clamp(x2, 1023), clamp(y2, 767)
+        ms = max(0, min(5000, ms))
+        ok = send_input(kind, x, y, x2, y2, ms)
         self.send_response(204 if ok else 502)
         self.send_header('Content-Length', '0')
         self.end_headers()
@@ -316,25 +336,72 @@ __INPUT_JS__
         # the default page is unchanged for everyone else.
         if INPUT_ENABLED:
             html = html.replace(b'__INPUT_JS__', b"""    <div class="info" style="color:#4af">
-      Input enabled - click the screen to tap the device (experimental)
+      Input enabled &mdash; click to tap, right-click to press-and-hold, drag to swipe
     </div>
     <script>
     (function () {
       var img = document.getElementById('screen');
       img.style.cursor = 'crosshair';
-      img.addEventListener('click', function (e) {
-        // The image is scaled to fit the window, so map the click from
-        // displayed pixels back to the panel's own 1024x768 coordinates.
+
+      // A drag has to be told apart from a click. Below this many DEVICE
+      // pixels of travel we treat the gesture as a tap, which keeps a slightly
+      // shaky mouse from turning every click into a tiny swipe.
+      var DRAG_MIN_PX = 12;
+      var start = null;
+
+      function toDevice(e) {
+        // The image is scaled to fit the window; map back to the panel's own
+        // 1024x768 coordinates.
         var r = img.getBoundingClientRect();
         var nw = img.naturalWidth || 1024, nh = img.naturalHeight || 768;
-        var x = Math.round((e.clientX - r.left) * nw / r.width);
-        var y = Math.round((e.clientY - r.top) * nh / r.height);
+        return {
+          x: Math.round((e.clientX - r.left) * nw / r.width),
+          y: Math.round((e.clientY - r.top) * nh / r.height)
+        };
+      }
+
+      function send(body) {
         fetch('/input', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({x: x, y: y})
+          body: JSON.stringify(body)
         });
+      }
+
+      img.addEventListener('mousedown', function (e) {
+        if (e.button !== 0) return;          // left button only
+        start = toDevice(e);
+        start.t = Date.now();
+        e.preventDefault();
       });
+
+      img.addEventListener('mouseup', function (e) {
+        if (e.button !== 0 || !start) return;
+        var end = toDevice(e);
+        var dx = end.x - start.x, dy = end.y - start.y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist >= DRAG_MIN_PX) {
+          // Use the real elapsed time so a slow drag stays a drag and a fast
+          // one reads as a flick - LunaSysMgr derives velocity from this.
+          var ms = Math.max(100, Math.min(2000, Date.now() - start.t));
+          send({type: 'drag', x: start.x, y: start.y, x2: end.x, y2: end.y, ms: ms});
+        } else {
+          send({type: 'tap', x: start.x, y: start.y});
+        }
+        start = null;
+      });
+
+      // Right-click is press-and-hold. webOS uses long-press where a desktop
+      // UI would use a context menu, so the mapping is a natural one.
+      img.addEventListener('contextmenu', function (e) {
+        e.preventDefault();
+        var p = toDevice(e);
+        send({type: 'hold', x: p.x, y: p.y, ms: 1200});
+      });
+
+      // Dragging off the image should not leave a phantom gesture pending.
+      img.addEventListener('mouseleave', function () { start = null; });
     })();
     </script>""")
         else:

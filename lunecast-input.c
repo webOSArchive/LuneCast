@@ -1,9 +1,15 @@
 /*
- * lunecast-input - inject a tap into webOS (EXPERIMENTAL)
+ * lunecast-input - inject touch input into webOS (EXPERIMENTAL)
  *
- * Usage: lunecast-input X Y        (device coordinates, 1024x768)
+ * Usage:
+ *   lunecast-input tap  X Y                 a tap
+ *   lunecast-input hold X Y [MS]            press and hold (default 1200ms)
+ *   lunecast-input drag X1 Y1 X2 Y2 [MS]    drag/swipe (default 300ms)
+ *   lunecast-input X Y                      shorthand for "tap X Y"
  *
- * Sends a synthetic touch directly to LunaSysMgr. Nothing is installed and
+ * Coordinates are the panel's own, 0..1023 x 0..767.
+ *
+ * Sends synthetic touch directly to LunaSysMgr. Nothing is installed and
  * nothing is modified: this binary ships in the app directory, so
  * palm-uninstall removes it completely.
  *
@@ -32,7 +38,13 @@
  * Timestamps MUST be CLOCK_MONOTONIC. LunaSysMgr does gesture timing (tap vs
  * hold, flick velocity) on them, and wall-clock values are ~1.7 billion
  * seconds adrift of the stream they join, so they are discarded in silence.
- * This one detail cost three rounds of otherwise-correct attempts.
+ *
+ * WHY GESTURES ARE GENERATED HERE rather than streamed from the host: a drag
+ * is a burst of move events 10ms apart. Sending each one as its own
+ * `novacom run` would contend badly with the frame stream and the timing would
+ * be at the mercy of USB latency - and LunaSysMgr derives flick velocity from
+ * those timestamps. Emitting the whole gesture on-device costs one novacom
+ * round trip and keeps the cadence honest.
  *
  * Must run as root - the socket is srwxr-xr-x root, so the jailed app (uid
  * 5003) cannot use this. novacom runs as root, which is where taps come from.
@@ -52,8 +64,11 @@
 #define EV_FINGERID  7          /* webOS-specific contact id event */
 #define SCREEN_W     1024
 #define SCREEN_H     768
-#define MOVE_STEPS   2          /* stationary updates between down and up */
-#define STEP_US      10000      /* ~ the real panel's 100Hz report rate */
+#define STEP_MS      10         /* the real panel reports at ~100Hz */
+#define TAP_HOLD_MS  30         /* contact time for a plain tap */
+#define DEF_HOLD_MS  1200       /* comfortably past the long-press threshold */
+#define DEF_DRAG_MS  300
+#define FINGER_ID    0
 
 static int g_fd = -1;
 static struct sockaddr_un g_addr;
@@ -77,59 +92,121 @@ static int send_batch(struct input_event *ev, int n) {
     return 0;
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "usage: %s X Y   (0-%d, 0-%d)\n",
-                argv[0], SCREEN_W - 1, SCREEN_H - 1);
-        return 2;
-    }
+static int clamp(int v, int hi) {
+    return v < 0 ? 0 : (v > hi ? hi : v);
+}
 
-    int x = atoi(argv[1]);
-    int y = atoi(argv[2]);
-    const int id = 0;
+static int touch_down(int x, int y) {
     struct input_event ev[5];
-
-    if (x < 0) x = 0;
-    if (x >= SCREEN_W) x = SCREEN_W - 1;
-    if (y < 0) y = 0;
-    if (y >= SCREEN_H) y = SCREEN_H - 1;
-
-    g_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (g_fd < 0) {
-        perror("socket");
-        return 1;
-    }
-    memset(&g_addr, 0, sizeof(g_addr));
-    g_addr.sun_family = AF_UNIX;
-    snprintf(g_addr.sun_path, sizeof(g_addr.sun_path), "%s", TOUCH_SOCKET);
-
-    /* down */
-    fill(&ev[0], EV_FINGERID, 0, id);
+    fill(&ev[0], EV_FINGERID, 0, FINGER_ID);
     fill(&ev[1], EV_KEY, BTN_TOUCH, 1);
     fill(&ev[2], EV_ABS, ABS_X, x);
     fill(&ev[3], EV_ABS, ABS_Y, y);
     fill(&ev[4], EV_SYN, SYN_REPORT, 0);
-    if (send_batch(ev, 5) != 0) return 1;
-    usleep(STEP_US);
+    return send_batch(ev, 5);
+}
 
-    /* a couple of stationary updates, as a resting finger produces */
-    for (int i = 0; i < MOVE_STEPS; i++) {
-        fill(&ev[0], EV_FINGERID, 0, id);
-        fill(&ev[1], EV_ABS, ABS_X, x);
-        fill(&ev[2], EV_ABS, ABS_Y, y);
-        fill(&ev[3], EV_SYN, SYN_REPORT, 0);
-        if (send_batch(ev, 4) != 0) return 1;
-        usleep(STEP_US);
-    }
+static int touch_move(int x, int y) {
+    struct input_event ev[4];
+    fill(&ev[0], EV_FINGERID, 0, FINGER_ID);
+    fill(&ev[1], EV_ABS, ABS_X, x);
+    fill(&ev[2], EV_ABS, ABS_Y, y);
+    fill(&ev[3], EV_SYN, SYN_REPORT, 0);
+    return send_batch(ev, 4);
+}
 
-    /* up */
-    fill(&ev[0], EV_FINGERID, 0, id);
+static int touch_up(int x, int y) {
+    struct input_event ev[5];
+    fill(&ev[0], EV_FINGERID, 0, FINGER_ID);
     fill(&ev[1], EV_ABS, ABS_X, x);
     fill(&ev[2], EV_ABS, ABS_Y, y);
     fill(&ev[3], EV_KEY, BTN_TOUCH, 0);
     fill(&ev[4], EV_SYN, SYN_REPORT, 0);
-    if (send_batch(ev, 5) != 0) return 1;
+    return send_batch(ev, 5);
+}
+
+/* Hold a stationary contact for duration_ms, reporting at the panel's rate.
+ * A finger resting on glass keeps producing move events; going silent between
+ * down and up would not look like a real press to the gesture handling. */
+static int gesture_hold(int x, int y, int duration_ms) {
+    int steps = duration_ms / STEP_MS;
+
+    if (touch_down(x, y) != 0) return -1;
+    for (int i = 0; i < steps; i++) {
+        usleep(STEP_MS * 1000);
+        if (touch_move(x, y) != 0) return -1;
+    }
+    usleep(STEP_MS * 1000);
+    return touch_up(x, y);
+}
+
+/* Linear drag. The intermediate points matter: LunaSysMgr computes flick
+ * velocity from the last few, so a down-then-jump-then-up produces either
+ * nothing or an enormous accidental flick. */
+static int gesture_drag(int x1, int y1, int x2, int y2, int duration_ms) {
+    int steps = duration_ms / STEP_MS;
+    if (steps < 2) steps = 2;
+
+    if (touch_down(x1, y1) != 0) return -1;
+
+    for (int i = 1; i <= steps; i++) {
+        int x = x1 + (x2 - x1) * i / steps;
+        int y = y1 + (y2 - y1) * i / steps;
+        usleep(STEP_MS * 1000);
+        if (touch_move(x, y) != 0) return -1;
+    }
+
+    usleep(STEP_MS * 1000);
+    return touch_up(x2, y2);
+}
+
+static void usage(const char *prog) {
+    fprintf(stderr,
+        "usage:\n"
+        "  %s tap  X Y\n"
+        "  %s hold X Y [MS]            (default %d)\n"
+        "  %s drag X1 Y1 X2 Y2 [MS]    (default %d)\n"
+        "  %s X Y                      (shorthand for tap)\n"
+        "coordinates: 0..%d x 0..%d\n",
+        prog, prog, DEF_HOLD_MS, prog, DEF_DRAG_MS, prog,
+        SCREEN_W - 1, SCREEN_H - 1);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 3) { usage(argv[0]); return 2; }
+
+    g_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (g_fd < 0) { perror("socket"); return 1; }
+    memset(&g_addr, 0, sizeof(g_addr));
+    g_addr.sun_family = AF_UNIX;
+    snprintf(g_addr.sun_path, sizeof(g_addr.sun_path), "%s", TOUCH_SOCKET);
+
+    const char *cmd = argv[1];
+    int rc;
+
+    if (strcmp(cmd, "drag") == 0) {
+        if (argc < 6) { usage(argv[0]); return 2; }
+        int x1 = clamp(atoi(argv[2]), SCREEN_W - 1);
+        int y1 = clamp(atoi(argv[3]), SCREEN_H - 1);
+        int x2 = clamp(atoi(argv[4]), SCREEN_W - 1);
+        int y2 = clamp(atoi(argv[5]), SCREEN_H - 1);
+        int ms = (argc > 6) ? atoi(argv[6]) : DEF_DRAG_MS;
+        rc = gesture_drag(x1, y1, x2, y2, ms);
+    } else if (strcmp(cmd, "hold") == 0) {
+        if (argc < 4) { usage(argv[0]); return 2; }
+        int x = clamp(atoi(argv[2]), SCREEN_W - 1);
+        int y = clamp(atoi(argv[3]), SCREEN_H - 1);
+        int ms = (argc > 4) ? atoi(argv[4]) : DEF_HOLD_MS;
+        rc = gesture_hold(x, y, ms);
+    } else {
+        /* "tap X Y" or the bare "X Y" shorthand */
+        int base = (strcmp(cmd, "tap") == 0) ? 2 : 1;
+        if (argc < base + 2) { usage(argv[0]); return 2; }
+        int x = clamp(atoi(argv[base]), SCREEN_W - 1);
+        int y = clamp(atoi(argv[base + 1]), SCREEN_H - 1);
+        rc = gesture_hold(x, y, TAP_HOLD_MS);
+    }
 
     close(g_fd);
-    return 0;
+    return rc == 0 ? 0 : 1;
 }
