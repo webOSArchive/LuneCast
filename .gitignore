@@ -1,3 +1,4 @@
+.DS_Store
 # Build artifacts
 # NOTE: fbcapture and package/fbcapture are deliberately NOT ignored.
 # They were ignored until 2026-09-03, which is why the shipped IPK was built
