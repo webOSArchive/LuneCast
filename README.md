@@ -185,6 +185,60 @@ app content used to disappear and why stale fb1 content used to ghost
 through. The old "Clear Buffer" workaround for that ghosting is no longer
 needed and has been removed.
 
+## Remote input (experimental)
+
+Off by default and not advertised in the app's UI. Enable with:
+
+```bash
+./start-stream.py --enable-input
+```
+
+Then open the viewer **page** at `http://localhost:8080/` rather than `/stream`
+- input needs an element to attach handlers to. The image becomes clickable:
+
+| Mouse | Device |
+|-------|--------|
+| Left click | tap |
+| Right click | press and hold (1.2s) |
+| Click and drag | drag / swipe |
+| Drag up from the bottom edge | back / minimise (the gesture area is the bottom rows of the panel) |
+
+This works by sending synthetic touch events to the socket LunaSysMgr binds,
+via `lunecast-input` in the app directory. **Nothing is installed on the
+device and no system file is modified** - see "Uninstalling" below. Details,
+including how the wire format was recovered, are in
+`experimental/remote-input/README.md`.
+
+Input requires root, which `novacom` provides; the app itself runs jailed as
+uid 5003 and cannot inject.
+
+## Uninstalling
+
+```bash
+palm-install -r org.webosarchive.lunecast
+```
+
+LuneCast writes nothing outside its own app directory, so this removes it
+completely. Verified by installing, using every feature, uninstalling, and
+auditing the device:
+
+| Location | After uninstall |
+|----------|-----------------|
+| App + package directories | files removed (empty dirs remain - standard ipkg behaviour) |
+| LS2 role files (`/var/palm/ls2/roles/{prv,pub}/`) | removed |
+| Jail (`/var/palm/jail/org.webosarchive.lunecast`) | removed |
+| Launcher database | removed |
+| `/usr/lib`, `/etc`, `/var` | nothing was ever written |
+| `/etc/hidd/HidPlugins.xml` | untouched (md5 matches stock) |
+| `/media/internal/screen.jpg` | deleted by the app when streaming stops |
+| `/media/internal/appdata/org.webosarchive.lunecast` | empty stub webOS creates for every app |
+
+There is no `postinst` or `prerm` script, and deliberately so: there is
+nothing to install or unwind, and `palm-install` does not run those scripts
+anyway - only Preware and WOSQI do. Relying on them would mean cleanup that
+silently never happens for anyone installing the IPK directly. The app removes
+its own working files instead.
+
 ## Troubleshooting
 
 ### "No webOS device connected"

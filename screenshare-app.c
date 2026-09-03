@@ -136,6 +136,17 @@ static void stop_daemon(void) {
         }
         daemon_pid = 0;
     }
+
+    /* Remove the captured frame. It is a working file, not user data, and
+     * /media/internal is the USB-visible partition that palm-uninstall does
+     * not touch - so anything left here outlives the app. Cleaning up in the
+     * app means there is nothing for a prerm script to do, which matters
+     * because palm-install does not run prerm at all (only Preware/WOSQI do). */
+    unlink(FBCAPTURE_OUTPUT);
+
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", FBCAPTURE_OUTPUT);
+    unlink(tmp);
 }
 
 static int check_daemon_running(void) {
