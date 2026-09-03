@@ -82,6 +82,41 @@ static unsigned int frame_checksum(const unsigned char *buf, size_t len) {
 static unsigned int g_last_sum = 0;
 static int g_have_last_sum = 0;
 static int g_frame_changed = 0;  /* set by capture_screen: did this frame differ? */
+
+/* Trailing frames.
+ *
+ * A capture can land mid-redraw: tapping the launcher's tab strip updates the
+ * tabs immediately, but the icons underneath are drawn a moment later. If we
+ * sample once, see a change, send it, and then go quiet because the next
+ * sample is identical, the far end is left holding that half-drawn frame.
+ *
+ * So after the last detected change we keep emitting a couple more frames and
+ * keep polling at full rate for a settle window, rather than backing off the
+ * instant nothing appears to be moving. Same reasoning as the tap ripple: the
+ * frames that matter most are the ones right after motion appears to stop.
+ */
+#define TRAILING_FRAMES  2
+#define SETTLE_HOLD_MS   750
+
+/* Periodic keyframe.
+ *
+ * Change detection only sends when the composited frame differs from the last
+ * one sent. If a change is ever missed - a redraw landing in a framebuffer
+ * page we did not sample, say - the far end would hold a stale image
+ * indefinitely, because nothing would ever mark it dirty again.
+ *
+ * Until 2026-09-03 a bug hid this: the 5-second stats block zeroed
+ * frame_count, which is what drives the first-frame force_write, so the daemon
+ * happened to re-send the current screen every 5s. That accident was the only
+ * thing bounding how long a stale frame could persist. Fixing the counter
+ * removed the safety net, so here it is deliberately, and cheaper: one frame
+ * every 2s while idle, ~14KB/s, still far below the ~620KB/s the per-frame
+ * `novacom get` transport used on a completely static screen.
+ */
+#define KEYFRAME_INTERVAL_MS 2000
+
+static int g_trailing = 0;
+static long long g_last_sent_ms = 0;
 static int g_fb1_fd = -1;  /* Global fb1 file descriptor for overlay state checks */
 static int g_use_overlay = 1;  /* Whether to composite fb1 overlay (0=fb0 only) */
 static int g_stream_mode = 0;  /* -S: emit framed JPEGs on stdout instead of files */
@@ -462,7 +497,19 @@ static int capture_screen(unsigned char *fb0_map, unsigned char *fb1_map,
     int changed = (!g_have_last_sum || sum != g_last_sum);
     g_frame_changed = changed;
 
-    if (changed || force_write) {
+    /* Top the trailing counter back up on every change, so a continuous
+     * animation keeps streaming and the tail is only spent once it stops. */
+    if (changed) {
+        g_trailing = TRAILING_FRAMES;
+    } else if (g_trailing > 0) {
+        g_trailing--;
+    }
+
+    long long now_ms = (long long)(now_usec() / 1000);
+    int keyframe_due = (g_last_sent_ms != 0) &&
+                       ((now_ms - g_last_sent_ms) >= KEYFRAME_INTERVAL_MS);
+
+    if (changed || force_write || g_trailing > 0 || keyframe_due) {
         if (g_stream_mode) {
             size_t len = 0;
             rc = encode_jpeg_mem(rgb_buf, FB_WIDTH, FB_HEIGHT, quality, &len);
@@ -479,6 +526,7 @@ static int capture_screen(unsigned char *fb0_map, unsigned char *fb1_map,
         if (rc == 0) {
             g_last_sum = sum;
             g_have_last_sum = 1;
+            g_last_sent_ms = now_ms;
         }
     }
     long t2 = now_usec();
@@ -673,6 +721,8 @@ int main(int argc, char *argv[]) {
     long long start_time = current_time_ms();
     /* Adaptive polling state: start at the requested rate, back off when idle. */
     int cur_interval_ms = interval_ms;
+    long long last_change_ms = current_time_ms();
+    int stats_frames = 0;
     int idle_max_ms = interval_ms * 5;
     if (idle_max_ms > 250) idle_max_ms = 250;
 
@@ -688,6 +738,7 @@ int main(int argc, char *argv[]) {
         }
 
         frame_count++;
+        stats_frames++;
 
         if (daemon_mode) {
             /* Adaptive poll interval.
@@ -710,7 +761,10 @@ int main(int argc, char *argv[]) {
              * settled frame is always transmitted.
              */
             if (g_frame_changed) {
+                last_change_ms = current_time_ms();
                 cur_interval_ms = interval_ms;          /* activity: full rate */
+            } else if (current_time_ms() - last_change_ms < SETTLE_HOLD_MS) {
+                cur_interval_ms = interval_ms;          /* settle window: stay fast */
             } else if (cur_interval_ms < idle_max_ms) {
                 cur_interval_ms += cur_interval_ms / 2; /* idle: back off 1.5x */
                 if (cur_interval_ms > idle_max_ms) {
@@ -729,9 +783,12 @@ int main(int argc, char *argv[]) {
             /* Print stats every 5 seconds */
             long long total_elapsed = current_time_ms() - start_time;
             if (total_elapsed >= 5000) {
-                double fps = (double)frame_count * 1000.0 / total_elapsed;
-                fprintf(stderr, "FPS: %.1f, frames: %d\n", fps, frame_count);
-                frame_count = 0;
+                /* Use a separate counter: frame_count drives the first-frame
+                 * force_write, and zeroing it here made the daemon re-send an
+                 * identical frame every 5 seconds. */
+                double fps = (double)stats_frames * 1000.0 / total_elapsed;
+                fprintf(stderr, "FPS: %.1f, frames: %d\n", fps, stats_frames);
+                stats_frames = 0;
                 start_time = current_time_ms();
             }
         }
