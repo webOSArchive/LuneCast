@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- Describes the plugins that are used for this system and loaded by HIDd -->
+
+<!DOCTYPE plugins [
+    <!ELEMENT plugins (plugin*)>
+    <!ELEMENT plugin (name, eventsDeferIdle, eventSocketAddress, cmdSocketAddress, path)>
+    <!ELEMENT name (#PCDATA)>
+    <!ELEMENT eventsDeferIdle (#PCDATA)>
+    <!ELEMENT eventSocketAddress (#PCDATA)>
+    <!ELEMENT cmdSocketAddress (#PCDATA)>
+    <!ELEMENT path (#PCDATA)>
+]>
+
+<plugins>
+    <plugin>
+        <name>HidKeypad</name>
+        <eventsDeferIdle>true</eventsDeferIdle>
+        <eventSocketAddress>/var/run/hidd/KeypadEventSocket</eventSocketAddress>
+        <cmdSocketAddress>/var/run/hidd/KeypadCmdSocket</cmdSocketAddress>
+        <path>/usr/lib/libhidkeypad.so</path>
+	</plugin>
+    <plugin>
+        <name>HidTouchpanel</name>
+        <eventsDeferIdle>true</eventsDeferIdle>
+        <eventSocketAddress>/var/run/hidd/TouchpanelEventSocket</eventSocketAddress>
+        <cmdSocketAddress>/var/run/hidd/TouchpanelCmdSocket</cmdSocketAddress>
+        <path>/usr/lib/libhidtouchpanel.so</path>
+    </plugin>
+    <plugin>
+        <name>HidAvrcp</name>
+        <eventsDeferIdle>true</eventsDeferIdle>
+        <eventSocketAddress>/var/run/hidd/KeypadEventSocket</eventSocketAddress>
+        <cmdSocketAddress>/var/run/hidd/AvrcpCmdSocket</cmdSocketAddress>
+        <path>/usr/lib/libhidavrcp.so</path>
+    </plugin>
+    <plugin>
+        <name>HidInputDev</name>
+        <eventsDeferIdle>true</eventsDeferIdle>
+        <eventSocketAddress>/var/run/hidd/InputDevEventSocket</eventSocketAddress>
+        <cmdSocketAddress>/var/run/hidd/InputDevCmdSocket</cmdSocketAddress>
+        <path>/usr/lib/libhidinputdev.so</path>
+    </plugin>
+</plugins>

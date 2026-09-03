@@ -6,10 +6,12 @@ Share your HP TouchPad's screen with your computer over USB.
 
 - **Cross-platform viewer** - Works with VLC, ffplay, or any browser
 - **MJPEG streaming** - Standard HTTP stream at ~15 FPS
-- **Fullscreen app capture** - Captures both fb0 (compositor) and fb1 (overlay)
+- **Correct layer compositing** - Alpha-composites the fb0 chrome plane over the fb1 app plane
 - **webOS app** - Launches from device launcher, auto-stops on close
-- **Clear Buffer button** - Clears stale overlay for clean launcher capture
 - **No network required** - Everything works over USB via novacom
+- **Automatic port negotiation** - If 8080 is taken on the host, the server
+  picks another and tells the device, which updates its on-screen instructions
+- **Auto-opens a viewer** - `--open browser|vlc|ffplay|none` (default browser)
 
 ## Quick Start
 
@@ -17,7 +19,7 @@ Share your HP TouchPad's screen with your computer over USB.
 
 **Option A: Download pre-built IPK** (recommended for end users)
 ```bash
-palm-install org.webosarchive.screenshare_1.0.0_all.ipk
+palm-install org.webosarchive.lunecast_1.0.0_all.ipk
 ```
 
 **Option B: Build from source**
@@ -25,19 +27,19 @@ palm-install org.webosarchive.screenshare_1.0.0_all.ipk
 make install
 ```
 
-### 2. Launch "Screen Share" from the device launcher
+### 2. Launch "LuneCast" from the device launcher
 
 The app will start the capture daemon and show connection instructions.
 
 ### 3. On your computer, run the streaming server
 
 ```bash
-./stream-server.py
+./start-stream.py
 ```
 
 For lowest latency:
 ```bash
-./stream-server.py --low-latency
+./start-stream.py --low-latency
 ```
 
 ### 4. View the stream
@@ -55,33 +57,28 @@ vlc --network-caching=50 http://localhost:8080/stream
 **Browser:**
 Open http://localhost:8080/
 
-### 5. Clear stale buffer (if needed)
+### 5. Close the app on the device
 
-If viewing the launcher shows remnants of previous apps, tap the
-**"Clear Buffer"** button in the Screen Share app.
-
-### 6. Close the app on the device
-
-Swipe up the card to stop streaming.
+Swipe the card away to stop streaming.
 
 ## Distribution
 
 The IPK package is fully self-contained:
-- `screenshare` - The webOS app (manages daemon, shows UI)
+- `lunecast` - The webOS app (manages daemon, shows UI)
 - `fbcapture` - The capture daemon (bundled, no separate install needed)
 - `icon.png` - App icon
 
 Users only need to:
 1. Install the IPK on their TouchPad
-2. Run `stream-server.py` on their computer (requires Python 3 + novacom)
+2. Run `start-stream.py` on their computer (requires Python 3 + novacom)
 
 ## Components
 
 | File | Description |
 |------|-------------|
-| `screenshare` | webOS app - shows UI and manages daemon |
+| `lunecast` | webOS app - shows UI and manages daemon |
 | `fbcapture` | Daemon - captures framebuffer to JPEG |
-| `stream-server.py` | Host - MJPEG HTTP server for VLC/browsers |
+| `start-stream.py` | Host - MJPEG HTTP server for VLC/browsers |
 
 ## Build Requirements
 
@@ -100,7 +97,7 @@ Users only need to:
 ```bash
 make              # Build everything
 make daemon       # Build fbcapture only
-make app          # Build screenshare app only
+make app          # Build lunecast app only
 make package      # Create IPK package
 make install      # Install to device
 make uninstall    # Remove from device
@@ -114,13 +111,13 @@ make start-daemon # Start daemon manually
 make stop-daemon  # Stop daemon
 
 # Then on host:
-./stream-server.py --force-daemon
+./start-stream.py --force-daemon
 ```
 
 ## Stream Server Options
 
 ```
-./stream-server.py [options]
+./start-stream.py [options]
 
 Options:
   --port, -p PORT     HTTP port (default: 8080)
@@ -146,7 +143,7 @@ Options:
 │   HP TouchPad   │◄────────────────────►│  Host Computer  │
 │                 │       novacom        │                 │
 │  ┌───────────┐  │                      │  ┌───────────┐  │
-│  │screenshare│  │                      │  │  stream-  │  │
+│  │ lunecast  │  │                      │  │  stream-  │  │
 │  │   (app)   │  │                      │  │ server.py │  │
 │  └─────┬─────┘  │                      │  └─────┬─────┘  │
 │        │fork    │                      │        │        │
@@ -175,11 +172,72 @@ Both framebuffers use triple-buffering (1024×2304 total, 3 pages of 768 lines).
 The daemon reads the current pan offset from `/sys/class/graphics/fb*/pan` to
 capture the correct visible buffer.
 
-### Clear Buffer Feature
+### Layer order
 
-When viewing the launcher, stale content from previously-running apps may
-remain in fb1. The **"Clear Buffer"** button in the Screen Share app fills
-fb1 with black, allowing clean launcher capture.
+`fb0` is the TOP layer (system chrome: status bar, notifications) and `fb1`
+is the app plane beneath it - the opposite of what earlier versions assumed.
+Measured on device, fb0 is `alpha=0` over 96.4% of the panel and opaque only
+in the status bar strip, so it cannot be the base layer. The daemon
+alpha-composites fb0 over fb1 per pixel.
+
+Earlier versions colour-keyed on "non-black RGB" instead, which is why dark
+app content used to disappear and why stale fb1 content used to ghost
+through. The old "Clear Buffer" workaround for that ghosting is no longer
+needed and has been removed.
+
+## Remote input (experimental)
+
+Off by default and not advertised in the app's UI. Enable with:
+
+```bash
+./start-stream.py --enable-input
+```
+
+Then open the viewer **page** at `http://localhost:8080/` rather than `/stream`
+- input needs an element to attach handlers to. The image becomes clickable:
+
+| Mouse | Device |
+|-------|--------|
+| Left click | tap |
+| Right click | press and hold (1.2s) |
+| Click and drag | drag / swipe |
+| Drag up from the bottom edge | back / minimise (the gesture area is the bottom rows of the panel) |
+
+This works by sending synthetic touch events to the socket LunaSysMgr binds,
+via `lunecast-input` in the app directory. **Nothing is installed on the
+device and no system file is modified** - see "Uninstalling" below. Details,
+including how the wire format was recovered, are in
+`experimental/remote-input/README.md`.
+
+Input requires root, which `novacom` provides; the app itself runs jailed as
+uid 5003 and cannot inject.
+
+## Uninstalling
+
+```bash
+palm-install -r org.webosarchive.lunecast
+```
+
+LuneCast writes nothing outside its own app directory, so this removes it
+completely. Verified by installing, using every feature, uninstalling, and
+auditing the device:
+
+| Location | After uninstall |
+|----------|-----------------|
+| App + package directories | files removed (empty dirs remain - standard ipkg behaviour) |
+| LS2 role files (`/var/palm/ls2/roles/{prv,pub}/`) | removed |
+| Jail (`/var/palm/jail/org.webosarchive.lunecast`) | removed |
+| Launcher database | removed |
+| `/usr/lib`, `/etc`, `/var` | nothing was ever written |
+| `/etc/hidd/HidPlugins.xml` | untouched (md5 matches stock) |
+| `/media/internal/screen.jpg` | deleted by the app when streaming stops |
+| `/media/internal/appdata/org.webosarchive.lunecast` | empty stub webOS creates for every app |
+
+There is no `postinst` or `prerm` script, and deliberately so: there is
+nothing to install or unwind, and `palm-install` does not run those scripts
+anyway - only Preware and WOSQI do. Relying on them would mean cleanup that
+silently never happens for anyone installing the IPK directly. The app removes
+its own working files instead.
 
 ## Troubleshooting
 
@@ -189,11 +247,11 @@ fb1 with black, allowing clean launcher capture.
 - Run `novacom -l` to verify connection
 
 ### App crashes on launch
-- Check that both `screenshare` and `fbcapture` are in the package
+- Check that both `lunecast` and `fbcapture` are in the package
 - Verify font files exist on device
 
 ### Low FPS or stuttering
-- Try lower quality: `./stream-server.py -q 50`
+- Try lower quality: `./start-stream.py -q 50`
 - Use a better USB cable
 - Close other apps on device
 

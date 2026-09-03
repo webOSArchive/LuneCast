@@ -1,9 +1,11 @@
 # Build artifacts
-fbcapture
-fbcapture.o
-
-# Package artifacts
-package/fbcapture
+# NOTE: fbcapture and package/fbcapture are deliberately NOT ignored.
+# They were ignored until 2026-09-03, which is why the shipped IPK was built
+# from a package/ directory with no daemon in it - the app installed fine but
+# could never start capturing. The stripped ARM binaries are committed
+# alongside the sources so the packaged IPK can't silently lose the daemon
+# again. Only intermediate object files are ignored.
+*.o
 
 # Test files
 screen_test.jpg
