@@ -1,4 +1,4 @@
-# LuneCast
+# webOS LuneCast
 
 Share your HP TouchPad's screen with your computer over USB.
 
