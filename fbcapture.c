@@ -84,6 +84,7 @@ static int g_have_last_sum = 0;
 static int g_frame_changed = 0;  /* set by capture_screen: did this frame differ? */
 static int g_fb1_fd = -1;  /* Global fb1 file descriptor for overlay state checks */
 static int g_use_overlay = 1;  /* Whether to composite fb1 overlay (0=fb0 only) */
+static int g_stream_mode = 0;  /* -S: emit framed JPEGs on stdout instead of files */
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -260,29 +261,18 @@ static void composite_to_rgb(const unsigned char *fb0, const unsigned char *fb1,
     }
 }
 
-/* Save RGB buffer as JPEG */
-static int save_jpeg(const char *filename, unsigned char *rgb,
-                     int width, int height, int quality) {
+/* Encode RGB to JPEG into any already-open FILE*.
+ *
+ * Shared by the file writer and the stream writer so the encoder settings
+ * cannot drift apart between them. */
+static void encode_jpeg(FILE *out, unsigned char *rgb,
+                        int width, int height, int quality) {
     struct jpeg_compress_struct cinfo;
     struct jpeg_error_mgr jerr;
-    FILE *outfile;
-    int row_stride;
-
-    /* Use temp file and rename for atomic write */
-    char tmpfile[256];
-    snprintf(tmpfile, sizeof(tmpfile), "%s.tmp", filename);
 
     cinfo.err = jpeg_std_error(&jerr);
     jpeg_create_compress(&cinfo);
-
-    outfile = fopen(tmpfile, "wb");
-    if (!outfile) {
-        fprintf(stderr, "Failed to open output file: %s\n", tmpfile);
-        jpeg_destroy_compress(&cinfo);
-        return -1;
-    }
-
-    jpeg_stdio_dest(&cinfo, outfile);
+    jpeg_stdio_dest(&cinfo, out);
 
     cinfo.image_width = width;
     cinfo.image_height = height;
@@ -300,7 +290,7 @@ static int save_jpeg(const char *filename, unsigned char *rgb,
 
     jpeg_start_compress(&cinfo, TRUE);
 
-    row_stride = width * 3;
+    int row_stride = width * 3;
 
     /* Hand libjpeg many scanlines per call instead of one - fewer calls through
      * the compressor's per-row bookkeeping. */
@@ -315,8 +305,23 @@ static int save_jpeg(const char *filename, unsigned char *rgb,
     }
 
     jpeg_finish_compress(&cinfo);
-    fclose(outfile);
     jpeg_destroy_compress(&cinfo);
+}
+
+/* Save RGB buffer as JPEG, written to a temp file and renamed into place. */
+static int save_jpeg(const char *filename, unsigned char *rgb,
+                     int width, int height, int quality) {
+    char tmpfile[256];
+    snprintf(tmpfile, sizeof(tmpfile), "%s.tmp", filename);
+
+    FILE *outfile = fopen(tmpfile, "wb");
+    if (!outfile) {
+        fprintf(stderr, "Failed to open output file: %s\n", tmpfile);
+        return -1;
+    }
+
+    encode_jpeg(outfile, rgb, width, height, quality);
+    fclose(outfile);
 
     /* Atomic rename */
     if (rename(tmpfile, filename) != 0) {
@@ -324,6 +329,66 @@ static int save_jpeg(const char *filename, unsigned char *rgb,
         unlink(tmpfile);
         return -1;
     }
+
+    return 0;
+}
+
+/* ---- Stream mode ---------------------------------------------------------
+ *
+ * Instead of writing a JPEG to /media/internal every frame and having the host
+ * pull it with a fresh `novacom get` each time (~53ms plus a process spawn per
+ * frame, and a VFAT write per frame on the device), the daemon encodes to
+ * memory and writes framed JPEGs to stdout. The host runs ONE
+ * `novacom run ... -S` and reads frames as they arrive.
+ *
+ * Frame format, repeated:
+ *
+ *     "LCF1"                4 bytes  magic, lets a reader resync
+ *     length                4 bytes  big-endian, payload size
+ *     JPEG                  <length> bytes
+ *
+ * libjpeg 6.2 (what the device ships) has no jpeg_mem_dest, so the memory
+ * destination is an fmemopen() stream - verified present and working on the
+ * device's glibc 2.8.
+ */
+#define STREAM_MAGIC "LCF1"
+#define STREAM_BUF_CAP (1024 * 1024)   /* a 1024x768 q75 frame is ~50-120KB */
+
+static unsigned char *g_stream_buf = NULL;
+
+static int encode_jpeg_mem(unsigned char *rgb, int width, int height,
+                           int quality, size_t *out_len) {
+    FILE *mem = fmemopen(g_stream_buf, STREAM_BUF_CAP, "wb");
+    if (!mem) {
+        perror("fmemopen");
+        return -1;
+    }
+
+    encode_jpeg(mem, rgb, width, height, quality);
+
+    long n = ftell(mem);
+    fclose(mem);
+
+    if (n <= 0) {
+        return -1;
+    }
+    *out_len = (size_t)n;
+    return 0;
+}
+
+/* Write one framed JPEG to stdout. Returns -1 if the host went away. */
+static int write_stream_frame(const unsigned char *jpeg, size_t len) {
+    unsigned char hdr[8];
+
+    memcpy(hdr, STREAM_MAGIC, 4);
+    hdr[4] = (unsigned char)((len >> 24) & 0xFF);
+    hdr[5] = (unsigned char)((len >> 16) & 0xFF);
+    hdr[6] = (unsigned char)((len >> 8) & 0xFF);
+    hdr[7] = (unsigned char)(len & 0xFF);
+
+    if (fwrite(hdr, 1, sizeof(hdr), stdout) != sizeof(hdr)) return -1;
+    if (fwrite(jpeg, 1, len, stdout) != len) return -1;
+    if (fflush(stdout) != 0) return -1;
 
     return 0;
 }
@@ -398,7 +463,19 @@ static int capture_screen(unsigned char *fb0_map, unsigned char *fb1_map,
     g_frame_changed = changed;
 
     if (changed || force_write) {
-        rc = save_jpeg(output, rgb_buf, FB_WIDTH, FB_HEIGHT, quality);
+        if (g_stream_mode) {
+            size_t len = 0;
+            rc = encode_jpeg_mem(rgb_buf, FB_WIDTH, FB_HEIGHT, quality, &len);
+            if (rc == 0) {
+                rc = write_stream_frame(g_stream_buf, len);
+                if (rc != 0) {
+                    /* Host closed the pipe - stop cleanly rather than spin. */
+                    running = 0;
+                }
+            }
+        } else {
+            rc = save_jpeg(output, rgb_buf, FB_WIDTH, FB_HEIGHT, quality);
+        }
         if (rc == 0) {
             g_last_sum = sum;
             g_have_last_sum = 1;
@@ -429,6 +506,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -0         fb0 only mode (no overlay, for launcher capture)\n");
     fprintf(stderr, "  -1         Single capture and exit (default)\n");
     fprintf(stderr, "  -T         Print per-stage timings to stderr\n");
+    fprintf(stderr, "  -S         Stream framed JPEGs on stdout (implies -d)\n");
     fprintf(stderr, "  -h         Show this help\n");
     fprintf(stderr, "\nBy default captures fb0+fb1 for fullscreen app support.\n");
     fprintf(stderr, "Use -0 to capture launcher/app switcher (disables fb1 overlay).\n");
@@ -449,7 +527,7 @@ int main(int argc, char *argv[]) {
     int interval_ms = DEFAULT_INTERVAL;
     int opt;
 
-    while ((opt = getopt(argc, argv, "o:q:dDi:p:01hT")) != -1) {
+    while ((opt = getopt(argc, argv, "o:q:dDi:p:01hTS")) != -1) {
         switch (opt) {
             case 'o':
                 output = optarg;
@@ -483,6 +561,11 @@ int main(int argc, char *argv[]) {
                 break;
             case 'T':
                 g_timing = 1;
+                break;
+            case 'S':
+                /* Stream mode implies continuous capture. */
+                g_stream_mode = 1;
+                daemon_mode = 1;
                 break;
             case '1':
                 daemon_mode = 0;
@@ -550,17 +633,33 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Stream mode: buffer for the in-memory JPEG destination. */
+    if (g_stream_mode) {
+        g_stream_buf = malloc(STREAM_BUF_CAP);
+        if (!g_stream_buf) {
+            perror("Failed to allocate stream buffer");
+            free(rgb_buf);
+            munmap(fb0_map, fb_size);
+            if (fb1_map) munmap(fb1_map, fb_size);
+            close(fb0_fd);
+            if (fb1_fd >= 0) close(fb1_fd);
+            return 1;
+        }
+    }
+
     /* Setup signal handlers for daemon mode */
     if (daemon_mode) {
         signal(SIGINT, signal_handler);
         signal(SIGTERM, signal_handler);
 
-        /* Write PID file */
-        if (write_pidfile(pidfile) != 0) {
+        /* Write PID file. Skipped when streaming: the host owns the process
+         * lifetime through the pipe, and a stale pidfile would only confuse
+         * the app's "is a daemon running" check. */
+        if (!g_stream_mode && write_pidfile(pidfile) != 0) {
             fprintf(stderr, "Warning: could not write PID file\n");
         }
 
-        if (!fork_to_background) {
+        if (!fork_to_background && !g_stream_mode) {
             fprintf(stderr, "Starting capture daemon (interval: %dms, quality: %d)\n",
                     interval_ms, quality);
             fprintf(stderr, "Output: %s\n", output);

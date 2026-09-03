@@ -47,6 +47,13 @@
  * fall back to the default, which is what the server will try first anyway.
  */
 #define STREAM_PORT_FILE "/media/internal/lunecast-port.txt"
+
+/* Written by stream-server.py while it is driving capture itself over a
+ * persistent novacom pipe (fbcapture -S). Two capture daemons running at once
+ * would double the CPU cost and fight for the framebuffer, so while this file
+ * exists we stop our own daemon and let the host own it. Removed when the
+ * server exits, at which point we take ownership back. */
+#define HOST_CAPTURE_FILE "/media/internal/lunecast-host.txt"
 #define DEFAULT_STREAM_PORT 8080
 #define PORT_POLL_MS 1000
 /* Poll interval. The daemon skips the JPEG encode when the composited frame
@@ -66,6 +73,7 @@
 static pid_t daemon_pid = 0;
 static SDL_Surface *icon_surface = NULL;  /* status-screen app icon, may be NULL */
 static int g_stream_port = DEFAULT_STREAM_PORT;
+static int g_host_capturing = 0;
 static int running = 1;
 
 /* Colors */
@@ -157,6 +165,11 @@ static void refresh_stream_port(void) {
     }
     last_check = now;
 
+    /* Is the host driving capture over its own pipe? */
+    FILE *hf = fopen(HOST_CAPTURE_FILE, "r");
+    g_host_capturing = (hf != NULL);
+    if (hf) fclose(hf);
+
     int port = DEFAULT_STREAM_PORT;
     FILE *f = fopen(STREAM_PORT_FILE, "r");
     if (f) {
@@ -205,7 +218,13 @@ static void render_screen(SDL_Surface *screen, TTF_Font *font_large,
     y += 64;
 
     /* Status */
-    if (check_daemon_running()) {
+    if (g_host_capturing) {
+        /* Host owns capture - make sure we are not also running one. */
+        if (daemon_pid > 0) {
+            stop_daemon();
+        }
+        render_text_centered(screen, font_medium, "Status: STREAMING", y, color_green);
+    } else if (check_daemon_running()) {
         render_text_centered(screen, font_medium, "Status: STREAMING", y, color_green);
     } else {
         render_text_centered(screen, font_medium, "Status: Starting...", y, color_gray);

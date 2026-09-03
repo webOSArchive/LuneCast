@@ -52,6 +52,112 @@ def fetch_frame() -> Optional[bytes]:
     return None
 
 
+def _read_exact(pipe, n):
+    """Read exactly n bytes, or None if the pipe closed first."""
+    chunks = []
+    remaining = n
+    while remaining > 0:
+        chunk = pipe.read(remaining)
+        if not chunk:
+            return None
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def stream_fetcher(quality: int, interval_ms: int):
+    """Read framed JPEGs from ONE persistent `novacom run ... -S`.
+
+    The file transport spawned a fresh `novacom get` per frame - roughly 53ms
+    of process spawn and USB session setup each time - and made the device
+    write a JPEG to VFAT every frame. Here the daemon encodes to memory and
+    pushes frames down a single pipe, so the host receives every frame the
+    device produces, in order, with no polling and no sampling.
+
+    Wire format per frame: b"LCF1" + 4-byte big-endian length + JPEG.
+    """
+    global current_frame, frame_count, running, _fps_line_active
+
+    cmd = ["novacom", "run", f"file://{DEVICE_APP_DIR}/fbcapture", "--",
+           "-S", "-i", str(interval_ms), "-q", str(quality)]
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, bufsize=0)
+    pipe = proc.stdout
+
+    last_fps_time = time.time()
+    fps_frame_count = 0
+
+    try:
+        while running:
+            header = _read_exact(pipe, 8)
+            if header is None:
+                break
+
+            if header[:4] != STREAM_MAGIC:
+                # Lost sync. Walk forward one byte at a time until the magic
+                # lines up again rather than abandoning the stream.
+                window = bytearray(header)
+                resynced = False
+                while running:
+                    idx = bytes(window).find(STREAM_MAGIC)
+                    if idx != -1 and len(window) - idx >= 8:
+                        header = bytes(window[idx:idx + 8])
+                        resynced = True
+                        break
+                    nxt = pipe.read(1)
+                    if not nxt:
+                        break
+                    window += nxt
+                    if len(window) > 4096:
+                        del window[:len(window) - 64]
+                if not resynced:
+                    break
+
+            length = int.from_bytes(header[4:8], "big")
+            if length == 0 or length > 8 * 1024 * 1024:
+                break   # implausible: treat as corruption and stop
+
+            payload = _read_exact(pipe, length)
+            if payload is None:
+                break
+
+            with frame_lock:
+                current_frame = payload
+                frame_count += 1
+            fps_frame_count += 1
+
+            now = time.time()
+            if now - last_fps_time >= 5.0:
+                fps = fps_frame_count / (now - last_fps_time)
+                if sys.stdout.isatty():
+                    print(f"\rStream FPS: {fps:4.1f}", end="", flush=True)
+                    _fps_line_active = True
+                else:
+                    print(f"Stream FPS: {fps:.1f}")
+                fps_frame_count = 0
+                last_fps_time = now
+    finally:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def publish_host_capture(enable: bool):
+    """Claim (or release) capture ownership so the device app does not also run
+    a daemon. The app polls this file once a second."""
+    try:
+        if enable:
+            subprocess.run(["novacom", "put", f"file://{DEVICE_HOST_FILE}"],
+                           input=b"1\n", capture_output=True, timeout=5)
+        else:
+            subprocess.run(["novacom", "run", "file://bin/rm", "--", "-f", DEVICE_HOST_FILE],
+                           capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
 def frame_fetcher(target_fps: int):
     """Background thread that continuously fetches frames"""
     global current_frame, frame_count, running
@@ -285,6 +391,9 @@ def open_viewer(port: int, open_with: str):
 _fps_line_active = False   # an in-place "Fetch FPS" line is awaiting a newline
 
 DEVICE_PORT_FILE = "/media/internal/lunecast-port.txt"
+DEVICE_HOST_FILE = "/media/internal/lunecast-host.txt"
+DEVICE_APP_DIR = "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.lunecast"
+STREAM_MAGIC = b"LCF1"
 PORT_SCAN_SPAN = 20
 
 
@@ -429,6 +538,9 @@ def main():
                        help='Low latency mode: quality=30, fps=20')
     parser.add_argument('--force-daemon', action='store_true',
                        help="Force start/stop daemon on device (default: let device app manage it)")
+    parser.add_argument('--transport', default='stream', choices=['stream', 'file'],
+                       help='stream: one persistent novacom pipe (default). '
+                            'file: legacy per-frame novacom get')
     parser.add_argument('--open', dest='open_with', default='browser',
                        choices=['browser', 'vlc', 'ffplay', 'none'],
                        help='Viewer to open automatically once the server is up (default: browser)')
@@ -462,7 +574,18 @@ def main():
 
     # Start frame fetcher thread
     print(f"Starting frame fetcher (target: {args.fps} FPS)...")
-    fetcher_thread = threading.Thread(target=frame_fetcher, args=(args.fps,), daemon=True)
+    if args.transport == 'stream':
+        # Claim capture first, then give the device app a moment to notice and
+        # shut its own daemon down - otherwise both capture for a second or two
+        # and compete for the framebuffer. The app polls the marker at 1Hz.
+        print("Claiming capture (persistent novacom stream)...")
+        publish_host_capture(True)
+        time.sleep(1.5)
+        interval_ms = max(20, int(1000 / args.fps))
+        fetcher_thread = threading.Thread(
+            target=stream_fetcher, args=(args.quality, interval_ms), daemon=True)
+    else:
+        fetcher_thread = threading.Thread(target=frame_fetcher, args=(args.fps,), daemon=True)
     fetcher_thread.start()
 
     # Wait for first frame
@@ -516,6 +639,8 @@ def main():
         server.serve_forever()
     finally:
         running = False
+        if args.transport == 'stream':
+            publish_host_capture(False)   # hand capture back to the device app
         if _fps_line_active:
             print()   # close the in-place FPS line so the prompt starts clean
         clear_published_port()
