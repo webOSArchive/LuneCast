@@ -34,12 +34,12 @@ The app will start the capture daemon and show connection instructions.
 ### 3. On your computer, run the streaming server
 
 ```bash
-./stream-server.py
+./start-stream.py
 ```
 
 For lowest latency:
 ```bash
-./stream-server.py --low-latency
+./start-stream.py --low-latency
 ```
 
 ### 4. View the stream
@@ -70,7 +70,7 @@ The IPK package is fully self-contained:
 
 Users only need to:
 1. Install the IPK on their TouchPad
-2. Run `stream-server.py` on their computer (requires Python 3 + novacom)
+2. Run `start-stream.py` on their computer (requires Python 3 + novacom)
 
 ## Components
 
@@ -78,7 +78,7 @@ Users only need to:
 |------|-------------|
 | `lunecast` | webOS app - shows UI and manages daemon |
 | `fbcapture` | Daemon - captures framebuffer to JPEG |
-| `stream-server.py` | Host - MJPEG HTTP server for VLC/browsers |
+| `start-stream.py` | Host - MJPEG HTTP server for VLC/browsers |
 
 ## Build Requirements
 
@@ -111,13 +111,13 @@ make start-daemon # Start daemon manually
 make stop-daemon  # Stop daemon
 
 # Then on host:
-./stream-server.py --force-daemon
+./start-stream.py --force-daemon
 ```
 
 ## Stream Server Options
 
 ```
-./stream-server.py [options]
+./start-stream.py [options]
 
 Options:
   --port, -p PORT     HTTP port (default: 8080)
@@ -197,7 +197,7 @@ needed and has been removed.
 - Verify font files exist on device
 
 ### Low FPS or stuttering
-- Try lower quality: `./stream-server.py -q 50`
+- Try lower quality: `./start-stream.py -q 50`
 - Use a better USB cable
 - Close other apps on device
 

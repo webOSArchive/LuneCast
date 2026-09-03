@@ -36,7 +36,7 @@
 
 /* Port negotiation.
  *
- * stream-server.py prefers DEFAULT_STREAM_PORT but will fall back to another
+ * start-stream.py prefers DEFAULT_STREAM_PORT but will fall back to another
  * port if that one is already taken on the host (nginx on 8080 is the case
  * that prompted this). Having bound, it writes the port it actually got to
  * this file over novacom, and we show that in the instructions instead of
@@ -48,7 +48,7 @@
  */
 #define STREAM_PORT_FILE "/media/internal/lunecast-port.txt"
 
-/* Written by stream-server.py while it is driving capture itself over a
+/* Written by start-stream.py while it is driving capture itself over a
  * persistent novacom pipe (fbcapture -S). Two capture daemons running at once
  * would double the CPU cost and fight for the framebuffer, so while this file
  * exists we stop our own daemon and let the host own it. Removed when the
@@ -248,18 +248,18 @@ static void render_screen(SDL_Surface *screen, TTF_Font *font_large,
     render_text_centered(screen, font_small, "then run:", y, color_gray);
     y += 34;
 
-    render_text_centered(screen, font_medium, "./stream-server.py", y, color_white);
+    render_text_centered(screen, font_medium, "./start-stream.py", y, color_white);
     y += 46;
 
     render_text_centered(screen, font_small, "Connect via USB, then open the stream at:", y, color_gray);
     y += 34;
 
     char stream_url[64];
-    /* Point at the viewer PAGE, not /stream. The page is an ordinary HTML
-     * document embedding <img src="/stream">, so only the img needs
-     * multipart/x-mixed-replace support - the most widely compatible way to
-     * consume it across browsers. */
-    snprintf(stream_url, sizeof(stream_url), "http://localhost:%d/", g_stream_port);
+    /* /stream directly - it fills the viewport rather than sitting inside a
+     * page, and both engines tested (Firefox, Chromium) render a top-level
+     * multipart/x-mixed-replace. The viewer page at / remains available for
+     * any browser that will not. */
+    snprintf(stream_url, sizeof(stream_url), "http://localhost:%d/stream", g_stream_port);
     render_text_centered(screen, font_medium, stream_url, y, color_white);
     y += 46;
 

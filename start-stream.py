@@ -6,7 +6,7 @@ Fetches screenshots from the TouchPad via novacom and streams them
 as MJPEG over HTTP. Compatible with VLC, ffplay, browsers, etc.
 
 Usage:
-    ./stream-server.py [--port 8080] [--fps 10]
+    ./start-stream.py [--port 8080] [--fps 10]
 
 View with:
     VLC:     vlc http://localhost:8080/stream
@@ -344,11 +344,12 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
 def open_viewer(port: int, open_with: str):
     """Open a viewer once the server is listening.
 
-    The browser gets the viewer PAGE (/), not the raw /stream endpoint. Both
-    render in Chromium and Firefox, but the page is the safer target: it is an
-    ordinary HTML document embedding <img src="/stream">, which is the most
-    widely supported way to consume multipart/x-mixed-replace, and it gives
-    the user something with a title and a URL bar they can bookmark.
+    Opens /stream directly: it fills the viewport with the image instead of
+    sitting inside a page. Verified rendering a top-level
+    multipart/x-mixed-replace in both engines available here - Firefox and
+    Chromium (tested via Edge). WebKit/Safari is untested; the viewer page at
+    / still embeds the stream in an <img> if a browser ever refuses the raw
+    endpoint.
 
     Fires on a short timer so the request lands after serve_forever() is
     actually accepting.
@@ -366,7 +367,7 @@ def open_viewer(port: int, open_with: str):
         print(f"No display detected - open {page_url} yourself.")
         return
 
-    target = page_url if open_with == 'browser' else stream_url
+    target = stream_url
     friendly = {'browser': 'your default browser', 'vlc': 'VLC', 'ffplay': 'ffplay'}[open_with]
     print(f"Opening {target} in {friendly} now...")
     print("  (if that does not work, open the URL above yourself)\n")
@@ -534,8 +535,8 @@ def main():
                        help='HTTP port (default: 8080)')
     parser.add_argument('--fps', '-f', type=int, default=15,
                        help='Target FPS (default: 15)')
-    parser.add_argument('--quality', '-q', type=int, default=75,
-                       help='JPEG quality 1-100 (default: 75, matching the device app)')
+    parser.add_argument('--quality', '-q', type=int, default=85,
+                       help='JPEG quality 1-100 (default: 85)')
     parser.add_argument('--low-latency', '-l', action='store_true',
                        help='Low latency mode: quality=30, fps=20')
     parser.add_argument('--force-daemon', action='store_true',

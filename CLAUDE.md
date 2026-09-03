@@ -75,7 +75,7 @@ Pan offsets are read from:
 |------|---------|
 | `fbcapture.c` | Capture daemon - reads fb0+fb1 with correct pan offsets, composites, encodes JPEG |
 | `screenshare-app.c` | webOS SDL app (builds to `lunecast`) - manages daemon lifecycle, shows status UI |
-| `stream-server.py` | Host-side MJPEG HTTP server - fetches JPEGs via novacom, serves to VLC/ffplay/browser |
+| `start-stream.py` | Host-side MJPEG HTTP server - fetches JPEGs via novacom, serves to VLC/ffplay/browser |
 | `Makefile` | Cross-compilation with Linaro GCC 4.9.4 |
 | `package/` | IPK contents (appinfo.json, binaries, icon) |
 | `CLAUDE.md` | This file - project context for AI sessions |
@@ -98,7 +98,7 @@ make install      # Install to device
 
 1. Install IPK on TouchPad: `palm-install org.webosarchive.lunecast_1.0.0_all.ipk`
 2. Launch "LuneCast" from device launcher
-3. Run `./stream-server.py` on host
+3. Run `./start-stream.py` on host
 4. View at http://localhost:8080/ or with ffplay/VLC
 
 ## Known Issues & Workarounds
@@ -225,7 +225,7 @@ The IPK is fully self-contained:
 - `icon.png` (64px launcher icon), `splash-icon.png` (256px), `status-icon.png` (128px, shown in-app)
 - `appinfo.json`
 
-Users only need the IPK + stream-server.py on their host.
+Users only need the IPK + start-stream.py on their host.
 
 ## Future Work
 
