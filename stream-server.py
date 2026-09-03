@@ -70,11 +70,23 @@ def frame_fetcher(target_fps: int):
                 frame_count += 1
             fps_frame_count += 1
 
-        # Print FPS every 5 seconds
+        # Report FPS every 5 seconds.
+        #
+        # On a terminal this rewrites one line in place, so the instructions
+        # printed at startup stay on screen instead of scrolling away. When
+        # stdout is redirected to a file or a pipe, carriage returns would
+        # just produce one unreadable line, so fall back to normal lines.
+        # Fixed width keeps a shorter value (9.2) from leaving a digit of a
+        # longer one (13.8) behind.
         now = time.time()
         if now - last_fps_time >= 5.0:
             fps = fps_frame_count / (now - last_fps_time)
-            print(f"Fetch FPS: {fps:.1f}")
+            global _fps_line_active
+            if sys.stdout.isatty():
+                print(f"\rFetch FPS: {fps:4.1f}", end="", flush=True)
+                _fps_line_active = True
+            else:
+                print(f"Fetch FPS: {fps:.1f}")
             fps_frame_count = 0
             last_fps_time = now
 
@@ -269,6 +281,8 @@ def open_viewer(port: int, open_with: str):
 
     threading.Timer(1.0, launch).start()
 
+
+_fps_line_active = False   # an in-place "Fetch FPS" line is awaiting a newline
 
 DEVICE_PORT_FILE = "/media/internal/lunecast-port.txt"
 PORT_SCAN_SPAN = 20
@@ -473,8 +487,9 @@ def main():
               f"its on-screen instructions may show the default.")
 
     def signal_handler(sig, frame):
-        global running
+        global running, _fps_line_active
         print("\nShutting down...")
+        _fps_line_active = False   # the \n above already closed the FPS line
         running = False
         # Call shutdown from a thread to avoid deadlock
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -501,6 +516,8 @@ def main():
         server.serve_forever()
     finally:
         running = False
+        if _fps_line_active:
+            print()   # close the in-place FPS line so the prompt starts clean
         clear_published_port()
         if args.force_daemon:
             print("Stopping device daemon...")
