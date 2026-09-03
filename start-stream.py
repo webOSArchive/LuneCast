@@ -311,6 +311,19 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
             max-width: 100%;
             border: 2px solid #333;
             border-radius: 8px;
+            /* Stop the browser treating the stream as a draggable image and
+               as selectable content - otherwise a click-drag starts a native
+               drag-and-drop of the picture instead of reaching the device. */
+            -webkit-user-drag: none;
+            -khtml-user-drag: none;
+            -moz-user-drag: none;
+            -o-user-drag: none;
+            user-drag: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+            touch-action: none;
         }
         .info {
             margin-top: 20px;
@@ -322,7 +335,7 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
 </head>
 <body>
     <h1>LuneCast</h1>
-    <img id="screen" src="/stream" alt="webOS Screen">
+    <img id="screen" src="/stream" alt="webOS Screen" draggable="false">
     <div class="info">
         <p>Stream URL: <a href="/stream">/stream</a> (for VLC, ffplay, etc.)</p>
         <p>Snapshot: <a href="/snapshot">/snapshot</a></p>
@@ -368,21 +381,45 @@ __INPUT_JS__
         });
       }
 
-      img.addEventListener('mousedown', function (e) {
-        if (e.button !== 0) return;          // left button only
-        start = toDevice(e);
-        start.t = Date.now();
+      // The browser wants these events for itself: an image is draggable
+      // content and right-click opens a context menu. Both have to be refused
+      // or the gesture never reaches the device.
+      img.addEventListener('dragstart', function (e) { e.preventDefault(); });
+      img.addEventListener('contextmenu', function (e) {
         e.preventDefault();
+        e.stopPropagation();
+        return false;
       });
 
-      img.addEventListener('mouseup', function (e) {
+      // Pointer events rather than mouse events, so that setPointerCapture can
+      // keep receiving movement after the cursor leaves the image. Without the
+      // capture a drag that ends outside the picture is simply lost.
+      img.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+
+        if (e.button === 2) {                 // right button: press and hold
+          var p = toDevice(e);
+          send({type: 'hold', x: p.x, y: p.y, ms: 1200});
+          return;
+        }
+        if (e.button !== 0) return;
+
+        start = toDevice(e);
+        start.t = Date.now();
+        try { img.setPointerCapture(e.pointerId); } catch (err) {}
+      });
+
+      img.addEventListener('pointerup', function (e) {
         if (e.button !== 0 || !start) return;
+        e.preventDefault();
+        try { img.releasePointerCapture(e.pointerId); } catch (err) {}
+
         var end = toDevice(e);
         var dx = end.x - start.x, dy = end.y - start.y;
         var dist = Math.sqrt(dx * dx + dy * dy);
 
         if (dist >= DRAG_MIN_PX) {
-          // Use the real elapsed time so a slow drag stays a drag and a fast
+          // Pass the real elapsed time so a slow drag stays a drag and a fast
           // one reads as a flick - LunaSysMgr derives velocity from this.
           var ms = Math.max(100, Math.min(2000, Date.now() - start.t));
           send({type: 'drag', x: start.x, y: start.y, x2: end.x, y2: end.y, ms: ms});
@@ -392,16 +429,7 @@ __INPUT_JS__
         start = null;
       });
 
-      // Right-click is press-and-hold. webOS uses long-press where a desktop
-      // UI would use a context menu, so the mapping is a natural one.
-      img.addEventListener('contextmenu', function (e) {
-        e.preventDefault();
-        var p = toDevice(e);
-        send({type: 'hold', x: p.x, y: p.y, ms: 1200});
-      });
-
-      // Dragging off the image should not leave a phantom gesture pending.
-      img.addEventListener('mouseleave', function () { start = null; });
+      img.addEventListener('pointercancel', function () { start = null; });
     })();
     </script>""")
         else:
