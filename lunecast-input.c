@@ -46,6 +46,17 @@
  * those timestamps. Emitting the whole gesture on-device costs one novacom
  * round trip and keeps the cadence honest.
  *
+ * THE GESTURE AREA is not a separate coordinate space. Captured from a real
+ * swipe-up off the bezel below the screen: it reports x 554..587, y 419..763,
+ * starting at y=763. Nothing ever reported y > 767. So the strip below the
+ * display maps into the very bottom rows of the same 1024x768 space, and the
+ * webOS back/minimise gesture is just
+ *
+ *     drag X 763  X 420
+ *
+ * That also means the gesture area sits INSIDE the streamed image, so a user
+ * can perform it by dragging up from the bottom edge of the picture.
+ *
  * Must run as root - the socket is srwxr-xr-x root, so the jailed app (uid
  * 5003) cannot use this. novacom runs as root, which is where taps come from.
  */

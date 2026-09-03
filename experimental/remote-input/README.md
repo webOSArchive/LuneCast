@@ -113,6 +113,22 @@ are 1.7 billion seconds adrift of the stream they join and get discarded
 silently. Fixing this made taps work on the first attempt, with a format that
 had already been correct for two rounds.
 
+## Coordinate space, including the gesture area
+
+Captured the same way (bind the event socket, make the gesture, read the log):
+
+| Gesture | x | y |
+|---------|---|---|
+| Swipe up from the bezel gesture area | 554..587 | 419..763, starting at 763 |
+| Tap the bottom edge of the screen | 542..546 | 758..761 |
+| Tap the status bar | 515 | 11..14 |
+
+Nothing ever reported `y > 767`. The gesture area below the display is **not**
+a separate coordinate space - it maps into the bottom rows of the same
+1024x768 panel space. So the back/minimise gesture is just a drag from y=763
+upward, and because those rows are inside the streamed image, a browser client
+can perform it by dragging up from the bottom edge of the picture.
+
 ## Install
 
 Requires the Linaro cross-compiler and PalmPDK (see the main README).
