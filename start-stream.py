@@ -467,18 +467,18 @@ def open_viewer(port: int, open_with: str):
 
 _fps_line_active = False   # an in-place "Fetch FPS" line is awaiting a newline
 
+DEVICE_APP_DIR = "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.lunecast"
 DEVICE_PORT_FILE = "/media/internal/lunecast-port.txt"
 DEVICE_HOST_FILE = "/media/internal/lunecast-host.txt"
 DEVICE_INPUT = f"{DEVICE_APP_DIR}/lunecast-input"
+STREAM_MAGIC = b"LCF1"
+PORT_SCAN_SPAN = 20
 
 # EXPERIMENTAL, off unless --enable-input. The helper ships inside the IPK and
 # talks straight to the socket LunaSysMgr binds, so nothing is installed on the
 # device and palm-uninstall removes it completely. Deliberately not advertised
 # in the CLI banner or the device's on-screen instructions yet.
 INPUT_ENABLED = False
-DEVICE_APP_DIR = "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.lunecast"
-STREAM_MAGIC = b"LCF1"
-PORT_SCAN_SPAN = 20
 
 
 def bind_server(preferred_port):
