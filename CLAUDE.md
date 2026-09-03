@@ -165,6 +165,26 @@ The capture reads both framebuffers at their current pan offsets and composites 
 - **Default**: Does NOT manage daemon (device app handles it)
 - **--force-daemon**: Server starts/stops daemon on device
 
+### Port negotiation
+
+Both ends default to 8080, but the host may not have it free (nginx is the
+common culprit). The server resolves this and tells the device:
+
+1. `bind_server()` tries the preferred port, then scans upward through
+   `PORT_SCAN_SPAN` (20) ports. `HTTPServer` sets `SO_REUSEADDR`, which lets
+   it rebind a port in TIME_WAIT but still fails against a live listener, so
+   a genuine conflict is detected rather than silently shadowed.
+2. Having bound, it writes the chosen port to
+   `/media/internal/lunecast-port.txt` on the device via `novacom put`.
+3. The app re-reads that file once a second (`refresh_stream_port()`) and
+   renders the port in its on-screen instructions. `/media/internal` is
+   bind-mounted rw into the PDK jail, so the jailed app can read it.
+4. On a clean exit the server deletes the file and the app falls back to
+   8080 - which is what the server will try first next time.
+
+Caveat: if the server is killed uncleanly the file is left behind, and the
+app will advertise a port nothing is listening on until the next run.
+
 ## Distribution
 
 The IPK is fully self-contained:

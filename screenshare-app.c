@@ -33,6 +33,22 @@
 #define FBCAPTURE_PATH   APP_DIR "/fbcapture"
 #define STATUS_ICON_PATH APP_DIR "/status-icon.png"
 #define FBCAPTURE_OUTPUT "/media/internal/screen.jpg"
+
+/* Port negotiation.
+ *
+ * stream-server.py prefers DEFAULT_STREAM_PORT but will fall back to another
+ * port if that one is already taken on the host (nginx on 8080 is the case
+ * that prompted this). Having bound, it writes the port it actually got to
+ * this file over novacom, and we show that in the instructions instead of
+ * telling the user to open a port nothing is listening on.
+ *
+ * /media/internal is bind-mounted read-write into the PDK jail, so this is
+ * readable from here. If the file is absent - server not started yet - we
+ * fall back to the default, which is what the server will try first anyway.
+ */
+#define STREAM_PORT_FILE "/media/internal/lunecast-port.txt"
+#define DEFAULT_STREAM_PORT 8080
+#define PORT_POLL_MS 1000
 /* Poll interval. The daemon skips the JPEG encode when the composited frame
  * is unchanged (~25ms/iteration idle vs ~140ms for an encode), so a tighter
  * interval costs little when the screen is static but noticeably shortens the
@@ -49,6 +65,7 @@
 
 static pid_t daemon_pid = 0;
 static SDL_Surface *icon_surface = NULL;  /* status-screen app icon, may be NULL */
+static int g_stream_port = DEFAULT_STREAM_PORT;
 static int running = 1;
 
 /* Colors */
@@ -129,6 +146,29 @@ static int check_daemon_running(void) {
     }
 }
 
+/* Re-read the port the host server published. Cheap, but pointless to do on
+ * every frame, so at most once a second. */
+static void refresh_stream_port(void) {
+    static Uint32 last_check = 0;
+    Uint32 now = SDL_GetTicks();
+
+    if (last_check != 0 && (now - last_check) < PORT_POLL_MS) {
+        return;
+    }
+    last_check = now;
+
+    int port = DEFAULT_STREAM_PORT;
+    FILE *f = fopen(STREAM_PORT_FILE, "r");
+    if (f) {
+        int parsed = 0;
+        if (fscanf(f, "%d", &parsed) == 1 && parsed >= 1024 && parsed <= 65535) {
+            port = parsed;
+        }
+        fclose(f);
+    }
+    g_stream_port = port;
+}
+
 static void render_text_centered(SDL_Surface *screen, TTF_Font *font,
                                   const char *text, int y, SDL_Color color) {
     SDL_Surface *text_surface = TTF_RenderText_Blended(font, text, color);
@@ -141,6 +181,8 @@ static void render_text_centered(SDL_Surface *screen, TTF_Font *font,
 
 static void render_screen(SDL_Surface *screen, TTF_Font *font_large,
                           TTF_Font *font_medium, TTF_Font *font_small) {
+    refresh_stream_port();
+
     /* Clear screen with dark background */
     SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 30, 30, 35));
 
@@ -193,7 +235,9 @@ static void render_screen(SDL_Surface *screen, TTF_Font *font_large,
     render_text_centered(screen, font_small, "Connect via USB, then open the stream at:", y, color_gray);
     y += 34;
 
-    render_text_centered(screen, font_medium, "http://localhost:8080/stream", y, color_white);
+    char stream_url[64];
+    snprintf(stream_url, sizeof(stream_url), "http://localhost:%d/stream", g_stream_port);
+    render_text_centered(screen, font_medium, stream_url, y, color_white);
     y += 46;
 
     /* Footer */

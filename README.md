@@ -9,6 +9,8 @@ Share your HP TouchPad's screen with your computer over USB.
 - **Correct layer compositing** - Alpha-composites the fb0 chrome plane over the fb1 app plane
 - **webOS app** - Launches from device launcher, auto-stops on close
 - **No network required** - Everything works over USB via novacom
+- **Automatic port negotiation** - If 8080 is taken on the host, the server
+  picks another and tells the device, which updates its on-screen instructions
 
 ## Quick Start
 

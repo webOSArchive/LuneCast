@@ -220,6 +220,67 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+DEVICE_PORT_FILE = "/media/internal/lunecast-port.txt"
+PORT_SCAN_SPAN = 20
+
+
+def bind_server(preferred_port):
+    """Bind the HTTP server, falling back if the preferred port is taken.
+
+    Tries the preferred port first (the default both ends assume), then scans
+    upward. HTTPServer sets SO_REUSEADDR, which lets us rebind a port sitting
+    in TIME_WAIT but still fails against something actively listening - so a
+    real conflict (nginx on 8080) is detected rather than silently shadowed.
+
+    Returns (server, port).
+    """
+    candidates = [preferred_port]
+    candidates += [p for p in range(preferred_port, preferred_port + PORT_SCAN_SPAN)
+                   if p != preferred_port]
+
+    last_error = None
+    for port in candidates:
+        try:
+            return ThreadedHTTPServer(('', port), MJPEGHandler), port
+        except OSError as exc:
+            last_error = exc
+            continue
+
+    raise SystemExit(
+        f"Could not bind any port in {preferred_port}-{preferred_port + PORT_SCAN_SPAN - 1}: {last_error}")
+
+
+def publish_port(port: int) -> bool:
+    """Tell the device which port we actually bound.
+
+    The app polls this file and renders it in its on-screen instructions, so
+    the two ends agree even when the default was unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["novacom", "put", f"file://{DEVICE_PORT_FILE}"],
+            input=f"{port}\n".encode(),
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def clear_published_port():
+    """Remove the published port on a clean exit, so the device does not keep
+    advertising a port that nothing is listening on any more."""
+    try:
+        subprocess.run(
+            ["novacom", "run", "file://bin/rm", "--", "-f", DEVICE_PORT_FILE],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """HTTP server that handles requests in threads"""
     allow_reuse_address = True
@@ -348,7 +409,15 @@ def main():
         print("WARNING: No frames received yet. Check device daemon.")
 
     # Start HTTP server
-    server = ThreadedHTTPServer(('', args.port), MJPEGHandler)
+    server, port = bind_server(args.port)
+    if port != args.port:
+        print(f"Port {args.port} is in use; using {port} instead.")
+
+    if publish_port(port):
+        print(f"Told the device to use port {port}.")
+    else:
+        print(f"WARNING: could not publish port {port} to the device; "
+              f"its on-screen instructions may show the default.")
 
     def signal_handler(sig, frame):
         global running
@@ -363,15 +432,15 @@ def main():
     print(f"\n{'='*60}")
     print(f"LuneCast Server (quality={args.quality}, fps={args.fps})")
     print(f"{'='*60}")
-    print(f"Web viewer:  http://localhost:{args.port}/")
-    print(f"MJPEG stream: http://localhost:{args.port}/stream")
+    print(f"Web viewer:  http://localhost:{port}/")
+    print(f"MJPEG stream: http://localhost:{port}/stream")
     print(f"")
     print(f"LOWEST LATENCY (recommended):")
     print(f"  ffplay -fflags nobuffer -flags low_delay -framedrop \\")
-    print(f"         http://localhost:{args.port}/stream")
+    print(f"         http://localhost:{port}/stream")
     print(f"")
     print(f"VLC (add low caching):")
-    print(f"  vlc --network-caching=50 http://localhost:{args.port}/stream")
+    print(f"  vlc --network-caching=50 http://localhost:{port}/stream")
     print(f"{'='*60}")
     print(f"Press Ctrl+C to stop\n")
 
@@ -379,6 +448,7 @@ def main():
         server.serve_forever()
     finally:
         running = False
+        clear_published_port()
         if args.force_daemon:
             print("Stopping device daemon...")
             stop_daemon()
