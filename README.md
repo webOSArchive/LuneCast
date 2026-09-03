@@ -1,4 +1,4 @@
-# webOS Screen Share
+# LuneCast
 
 Share your HP TouchPad's screen with your computer over USB.
 
@@ -6,9 +6,8 @@ Share your HP TouchPad's screen with your computer over USB.
 
 - **Cross-platform viewer** - Works with VLC, ffplay, or any browser
 - **MJPEG streaming** - Standard HTTP stream at ~15 FPS
-- **Fullscreen app capture** - Captures both fb0 (compositor) and fb1 (overlay)
+- **Correct layer compositing** - Alpha-composites the fb0 chrome plane over the fb1 app plane
 - **webOS app** - Launches from device launcher, auto-stops on close
-- **Clear Buffer button** - Clears stale overlay for clean launcher capture
 - **No network required** - Everything works over USB via novacom
 
 ## Quick Start
@@ -17,7 +16,7 @@ Share your HP TouchPad's screen with your computer over USB.
 
 **Option A: Download pre-built IPK** (recommended for end users)
 ```bash
-palm-install org.webosarchive.screenshare_1.0.0_all.ipk
+palm-install org.webosarchive.lunecast_1.0.0_all.ipk
 ```
 
 **Option B: Build from source**
@@ -25,7 +24,7 @@ palm-install org.webosarchive.screenshare_1.0.0_all.ipk
 make install
 ```
 
-### 2. Launch "Screen Share" from the device launcher
+### 2. Launch "LuneCast" from the device launcher
 
 The app will start the capture daemon and show connection instructions.
 
@@ -55,19 +54,14 @@ vlc --network-caching=50 http://localhost:8080/stream
 **Browser:**
 Open http://localhost:8080/
 
-### 5. Clear stale buffer (if needed)
+### 5. Close the app on the device
 
-If viewing the launcher shows remnants of previous apps, tap the
-**"Clear Buffer"** button in the Screen Share app.
-
-### 6. Close the app on the device
-
-Swipe up the card to stop streaming.
+Swipe the card away to stop streaming.
 
 ## Distribution
 
 The IPK package is fully self-contained:
-- `screenshare` - The webOS app (manages daemon, shows UI)
+- `lunecast` - The webOS app (manages daemon, shows UI)
 - `fbcapture` - The capture daemon (bundled, no separate install needed)
 - `icon.png` - App icon
 
@@ -79,7 +73,7 @@ Users only need to:
 
 | File | Description |
 |------|-------------|
-| `screenshare` | webOS app - shows UI and manages daemon |
+| `lunecast` | webOS app - shows UI and manages daemon |
 | `fbcapture` | Daemon - captures framebuffer to JPEG |
 | `stream-server.py` | Host - MJPEG HTTP server for VLC/browsers |
 
@@ -100,7 +94,7 @@ Users only need to:
 ```bash
 make              # Build everything
 make daemon       # Build fbcapture only
-make app          # Build screenshare app only
+make app          # Build lunecast app only
 make package      # Create IPK package
 make install      # Install to device
 make uninstall    # Remove from device
@@ -146,7 +140,7 @@ Options:
 │   HP TouchPad   │◄────────────────────►│  Host Computer  │
 │                 │       novacom        │                 │
 │  ┌───────────┐  │                      │  ┌───────────┐  │
-│  │screenshare│  │                      │  │  stream-  │  │
+│  │ lunecast  │  │                      │  │  stream-  │  │
 │  │   (app)   │  │                      │  │ server.py │  │
 │  └─────┬─────┘  │                      │  └─────┬─────┘  │
 │        │fork    │                      │        │        │
@@ -175,11 +169,18 @@ Both framebuffers use triple-buffering (1024×2304 total, 3 pages of 768 lines).
 The daemon reads the current pan offset from `/sys/class/graphics/fb*/pan` to
 capture the correct visible buffer.
 
-### Clear Buffer Feature
+### Layer order
 
-When viewing the launcher, stale content from previously-running apps may
-remain in fb1. The **"Clear Buffer"** button in the Screen Share app fills
-fb1 with black, allowing clean launcher capture.
+`fb0` is the TOP layer (system chrome: status bar, notifications) and `fb1`
+is the app plane beneath it - the opposite of what earlier versions assumed.
+Measured on device, fb0 is `alpha=0` over 96.4% of the panel and opaque only
+in the status bar strip, so it cannot be the base layer. The daemon
+alpha-composites fb0 over fb1 per pixel.
+
+Earlier versions colour-keyed on "non-black RGB" instead, which is why dark
+app content used to disappear and why stale fb1 content used to ghost
+through. The old "Clear Buffer" workaround for that ghosting is no longer
+needed and has been removed.
 
 ## Troubleshooting
 
@@ -189,7 +190,7 @@ fb1 with black, allowing clean launcher capture.
 - Run `novacom -l` to verify connection
 
 ### App crashes on launch
-- Check that both `screenshare` and `fbcapture` are in the package
+- Check that both `lunecast` and `fbcapture` are in the package
 - Verify font files exist on device
 
 ### Low FPS or stuttering

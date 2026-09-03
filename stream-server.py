@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MJPEG Streaming Server for webOS Screen Share
+MJPEG Streaming Server for LuneCast
 
 Fetches screenshots from the TouchPad via novacom and streams them
 as MJPEG over HTTP. Compatible with VLC, ffplay, browsers, etc.
@@ -108,7 +108,7 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
         html = b"""<!DOCTYPE html>
 <html>
 <head>
-    <title>webOS Screen Share</title>
+    <title>LuneCast</title>
     <style>
         body {
             margin: 0;
@@ -136,7 +136,7 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
     </style>
 </head>
 <body>
-    <h1>webOS Screen Share</h1>
+    <h1>LuneCast</h1>
     <img src="/stream" alt="webOS Screen">
     <div class="info">
         <p>Stream URL: <a href="/stream">/stream</a> (for VLC, ffplay, etc.)</p>
@@ -259,7 +259,7 @@ def start_daemon(fps: int = 15, quality: int = 50):
 
     # Try installed app path first, then fall back to /media/internal
     paths = [
-        "file:///media/cryptofs/apps/usr/palm/applications/org.webosarchive.screenshare/fbcapture",
+        "file:///media/cryptofs/apps/usr/palm/applications/org.webosarchive.lunecast/fbcapture",
         "file:///media/internal/fbcapture"
     ]
 
@@ -293,7 +293,7 @@ def stop_daemon():
 def main():
     global running
 
-    parser = argparse.ArgumentParser(description='webOS Screen Share MJPEG Server')
+    parser = argparse.ArgumentParser(description='LuneCast MJPEG Server')
     parser.add_argument('--port', '-p', type=int, default=8080,
                        help='HTTP port (default: 8080)')
     parser.add_argument('--fps', '-f', type=int, default=15,
@@ -330,7 +330,7 @@ def main():
                 print("Daemon started successfully")
             else:
                 print("WARNING: Could not start daemon. Is fbcapture deployed?")
-                print("Run 'make deploy' first, or launch the Screen Share app on the device")
+                print("Run 'make deploy' first, or launch the LuneCast app on the device")
 
     # Start frame fetcher thread
     print(f"Starting frame fetcher (target: {args.fps} FPS)...")
@@ -361,7 +361,7 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     print(f"\n{'='*60}")
-    print(f"webOS Screen Share Server (quality={args.quality}, fps={args.fps})")
+    print(f"LuneCast Server (quality={args.quality}, fps={args.fps})")
     print(f"{'='*60}")
     print(f"Web viewer:  http://localhost:{args.port}/")
     print(f"MJPEG stream: http://localhost:{args.port}/stream")

@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-Screen sharing solution for HP TouchPad (webOS 3.0.5) that captures the device screen and streams it to a host computer over USB via novacom.
+LuneCast - screen sharing for the HP TouchPad (webOS 3.0.5) that captures the device screen and streams it to a host computer over USB via novacom.
 
-**Status**: Working solution with known workaround for launcher capture.
+**Status**: Working. Layer compositing and capture rate fixed 2026-09-03.
 
 ## Architecture
 
@@ -74,7 +74,7 @@ Pan offsets are read from:
 | File | Purpose |
 |------|---------|
 | `fbcapture.c` | Capture daemon - reads fb0+fb1 with correct pan offsets, composites, encodes JPEG |
-| `screenshare-app.c` | webOS SDL app - manages daemon lifecycle, shows UI, Clear Buffer button |
+| `screenshare-app.c` | webOS SDL app (builds to `lunecast`) - manages daemon lifecycle, shows status UI |
 | `stream-server.py` | Host-side MJPEG HTTP server - fetches JPEGs via novacom, serves to VLC/ffplay/browser |
 | `Makefile` | Cross-compilation with Linaro GCC 4.9.4 |
 | `package/` | IPK contents (appinfo.json, binaries, icon) |
@@ -96,37 +96,50 @@ make install      # Install to device
 
 ## Usage
 
-1. Install IPK on TouchPad: `palm-install org.webosarchive.screenshare_1.0.0_all.ipk`
-2. Launch "Screen Share" from device launcher
+1. Install IPK on TouchPad: `palm-install org.webosarchive.lunecast_1.0.0_all.ipk`
+2. Launch "LuneCast" from device launcher
 3. Run `./stream-server.py` on host
 4. View at http://localhost:8080/ or with ffplay/VLC
 
 ## Known Issues & Workarounds
 
-### Stale fb1 Content When Viewing Launcher
+### Stale fb1 Content When Viewing Launcher - RESOLVED (2026-09-03)
 
-**Problem**: When switching from a fullscreen app to the launcher, stale content from fb1 (the overlay framebuffer) remains visible, causing ghosting artifacts.
+**This is fixed and the "Clear Buffer" workaround has been removed.**
 
-**Root Cause**: fb1 retains the last fullscreen app's content even after the app closes. The compositor doesn't clear it.
+The ghosting was never the compositor retaining stale pixels - it was the
+capture picking the wrong ones. The old `composite_to_rgb()` selected fb1
+wherever fb1's RGB was non-black, so whatever fb1 happened to hold bled
+through. With the corrected layer order and per-pixel alpha compositing
+(see "Key Discovery" above), fb1 is only shown where fb0's chrome plane is
+transparent, and the compositor keeps fb1 current on its own.
 
-**Current Workaround**: "Clear Buffer" button in the Screen Share app fills the screen with black for 2 seconds, which clears fb1. User taps this when they see artifacts.
+Verified by reproducing the original scenario: a fullscreen PDK app was
+closed (its pixels in fb1) and the card view captured immediately after -
+0.6% near-black across successive frames, where a ghost of the app's dark UI
+would have been ~90%.
 
-**Attempted Solutions That Failed**:
-1. Alpha channel detection in fb1 - fb1 doesn't use alpha the way we expected
-2. Checking if fb0 has significant black content - false positives with dark apps
-3. Auto-clearing periodically - only works when Screen Share app is fullscreen (defeats purpose)
-
-**Potential Future Solutions**:
-- Hook into webOS window manager events to detect app close
-- Investigate HP's open-sourced system software for how built-in screenshot works
-- Find a way to detect when LunaSysMgr (compositor) is in launcher mode
+If ghosting ever reappears, `fbcapture -0` (fb0-only) and the removed
+button are both in git history.
 
 ### Performance Notes
 
-- ~15 FPS achievable over USB
-- JPEG quality 50 is good balance of size/quality (~15-25KB per frame)
-- `--low-latency` mode: quality=30, fps=20
-- Latency ~100-200ms with proper viewer settings
+Measured on device (idle, `fbcapture -T`):
+
+| Stage | Cost |
+|-------|------|
+| Composite (1024x768, both planes) | ~20 ms |
+| JPEG encode (q50-75) | ~120 ms |
+| Unchanged frame (encode skipped) | ~25 ms |
+| Host `novacom get` per frame | ~53 ms (~19 fps ceiling) |
+
+- The JPEG encode dominates. This is stock 2011 libjpeg62 with no NEON;
+  `JDCT_IFAST` is already enabled.
+- Framebuffer memory is UNCACHED - read it with 32-bit words, not bytes.
+- The daemon skips the encode when the composited frame is unchanged, and
+  backs its poll interval off when idle (~27% of a core, was ~62%).
+- Remaining wins not yet done: a persistent novacom stream instead of a
+  per-frame `novacom get`, and downscaling before encode.
 
 ## Code Patterns
 
@@ -155,9 +168,9 @@ The capture reads both framebuffers at their current pan offsets and composites 
 ## Distribution
 
 The IPK is fully self-contained:
-- `screenshare` binary (SDL app)
+- `lunecast` binary (SDL app)
 - `fbcapture` binary (capture daemon)
-- `icon.png`
+- `icon.png` (64px launcher icon), `splash-icon.png` (256px), `status-icon.png` (128px, shown in-app)
 - `appinfo.json`
 
 Users only need the IPK + stream-server.py on their host.

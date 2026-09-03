@@ -1,4 +1,4 @@
-# webOS Screen Share - Makefile
+# LuneCast - Makefile
 # Cross-compilation for HP TouchPad (ARMv7)
 
 # Toolchain - use system Linaro GCC
@@ -24,12 +24,12 @@ LDFLAGS += -Wl,-rpath-link,$(PDK_LIB)
 LDFLAGS += -Wl,--allow-shlib-undefined
 
 # Package info
-APP_ID = org.webosarchive.screenshare
+APP_ID = org.webosarchive.lunecast
 VERSION = 1.0.0
 
 # Targets
 DAEMON = fbcapture
-APP = screenshare
+APP = lunecast
 
 .PHONY: all clean strip deploy test package install help app daemon
 
@@ -49,9 +49,9 @@ $(DAEMON): fbcapture.o
 fbcapture.o: fbcapture.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# App (screenshare)
+# App (lunecast)
 $(APP): screenshare-app.o
-	$(CC) $(LDFLAGS) -o $@ $^ -lSDL -lSDL_ttf -lpdl
+	$(CC) $(LDFLAGS) -o $@ $^ -lSDL -lSDL_ttf -lSDL_image -lpdl
 
 screenshare-app.o: screenshare-app.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -115,7 +115,7 @@ package: $(DAEMON) $(APP) strip
 install: package
 	palm-install *.ipk
 	@echo ""
-	@echo "App installed! Find 'Screen Share' in the launcher."
+	@echo "App installed! Find 'LuneCast' in the launcher."
 
 # Uninstall from device
 uninstall:
@@ -123,12 +123,12 @@ uninstall:
 
 # Show help
 help:
-	@echo "webOS Screen Share Build System"
+	@echo "LuneCast Build System"
 	@echo ""
 	@echo "Targets:"
 	@echo "  all           - Build daemon and app"
 	@echo "  daemon        - Build fbcapture daemon only"
-	@echo "  app           - Build screenshare app only"
+	@echo "  app           - Build lunecast app only"
 	@echo "  strip         - Strip debug symbols"
 	@echo "  clean         - Remove build artifacts"
 	@echo ""

@@ -1,5 +1,5 @@
 /*
- * screenshare-app - webOS Screen Share Application
+ * lunecast - LuneCast sender for webOS (HP TouchPad)
  *
  * Simple SDL-based app that:
  * 1. Starts the fbcapture daemon when launched
@@ -20,12 +20,18 @@
 
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <SDL_image.h>
 #include <PDL.h>
 
 #define SCREEN_WIDTH  1024
 #define SCREEN_HEIGHT 768
 
-#define FBCAPTURE_PATH "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.screenshare/fbcapture"
+/* Install directory. Everything that depends on the app id derives from this,
+ * so a rebrand only has to change it in one place. */
+#define APP_DIR "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.lunecast"
+
+#define FBCAPTURE_PATH   APP_DIR "/fbcapture"
+#define STATUS_ICON_PATH APP_DIR "/status-icon.png"
 #define FBCAPTURE_OUTPUT "/media/internal/screen.jpg"
 /* Poll interval. The daemon skips the JPEG encode when the composited frame
  * is unchanged (~25ms/iteration idle vs ~140ms for an encode), so a tighter
@@ -42,14 +48,8 @@
 #define FONT_SIZE_SMALL 24
 
 static pid_t daemon_pid = 0;
+static SDL_Surface *icon_surface = NULL;  /* status-screen app icon, may be NULL */
 static int running = 1;
-static Uint32 clear_buffer_until = 0;  /* Timestamp when to stop showing black */
-
-/* Button position for "Clear Buffer" */
-#define BUTTON_X 312
-#define BUTTON_Y 580
-#define BUTTON_W 400
-#define BUTTON_H 60
 
 /* Colors */
 static SDL_Color color_white = {255, 255, 255, 255};
@@ -141,25 +141,26 @@ static void render_text_centered(SDL_Surface *screen, TTF_Font *font,
 
 static void render_screen(SDL_Surface *screen, TTF_Font *font_large,
                           TTF_Font *font_medium, TTF_Font *font_small) {
-    Uint32 now = SDL_GetTicks();
-
-    /* If we're in clear buffer mode, just show black */
-    if (clear_buffer_until > 0 && now < clear_buffer_until) {
-        SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 0, 0, 0));
-        render_text_centered(screen, font_medium, "Clearing buffer...", SCREEN_HEIGHT / 2, color_gray);
-        SDL_Flip(screen);
-        return;
-    }
-    clear_buffer_until = 0;  /* Reset after timeout */
-
     /* Clear screen with dark background */
     SDL_FillRect(screen, NULL, SDL_MapRGB(screen->format, 30, 30, 35));
 
+    /* Layout is built by accumulating y rather than using absolute positions,
+     * so it stays correct if the icon fails to load. The start offset centres
+     * the block vertically now that the Clear Buffer button is gone. */
     int y = 80;
 
+    /* App icon */
+    if (icon_surface) {
+        SDL_Rect icon_dest = {(SCREEN_WIDTH - icon_surface->w) / 2, y, 0, 0};
+        SDL_BlitSurface(icon_surface, NULL, screen, &icon_dest);
+        y += icon_surface->h + 12;
+    } else {
+        y += 40;
+    }
+
     /* Title */
-    render_text_centered(screen, font_large, "Screen Share", y, color_white);
-    y += 80;
+    render_text_centered(screen, font_large, "LuneCast", y, color_white);
+    y += 64;
 
     /* Status */
     if (check_daemon_running()) {
@@ -169,43 +170,35 @@ static void render_screen(SDL_Surface *screen, TTF_Font *font_large,
         /* Try to restart */
         start_daemon();
     }
-    y += 60;
+    y += 52;
 
     /* Divider */
     SDL_Rect divider = {100, y, SCREEN_WIDTH - 200, 2};
     SDL_FillRect(screen, &divider, SDL_MapRGB(screen->format, 60, 60, 65));
-    y += 40;
+    y += 24;
 
     /* Instructions */
-    render_text_centered(screen, font_small, "On your computer, run:", y, color_gray);
-    y += 50;
+    render_text_centered(screen, font_small, "On your computer, download:", y, color_gray);
+    y += 34;
+
+    render_text_centered(screen, font_medium, "https://github.com/webOSArchive/LuneCast", y, color_white);
+    y += 46;
+
+    render_text_centered(screen, font_small, "then run:", y, color_gray);
+    y += 34;
 
     render_text_centered(screen, font_medium, "./stream-server.py", y, color_white);
-    y += 50;
+    y += 46;
 
-    render_text_centered(screen, font_small, "Then open in VLC:", y, color_gray);
-    y += 50;
+    render_text_centered(screen, font_small, "Connect via USB, then open the stream at:", y, color_gray);
+    y += 34;
 
     render_text_centered(screen, font_medium, "http://localhost:8080/stream", y, color_white);
-    y += 60;
-
-    /* Clear Buffer button */
-    SDL_Rect button = {BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H};
-    SDL_FillRect(screen, &button, SDL_MapRGB(screen->format, 60, 60, 70));
-    /* Button border */
-    SDL_Rect border_top = {BUTTON_X, BUTTON_Y, BUTTON_W, 2};
-    SDL_Rect border_bot = {BUTTON_X, BUTTON_Y + BUTTON_H - 2, BUTTON_W, 2};
-    SDL_Rect border_left = {BUTTON_X, BUTTON_Y, 2, BUTTON_H};
-    SDL_Rect border_right = {BUTTON_X + BUTTON_W - 2, BUTTON_Y, 2, BUTTON_H};
-    Uint32 border_color = SDL_MapRGB(screen->format, 100, 100, 110);
-    SDL_FillRect(screen, &border_top, border_color);
-    SDL_FillRect(screen, &border_bot, border_color);
-    SDL_FillRect(screen, &border_left, border_color);
-    SDL_FillRect(screen, &border_right, border_color);
-    render_text_centered(screen, font_medium, "Clear Buffer", BUTTON_Y + 12, color_white);
+    y += 46;
 
     /* Footer */
-    render_text_centered(screen, font_small, "Swipe up to close and stop streaming", BUTTON_Y + 100, color_darkgray);
+    y += 26;
+    render_text_centered(screen, font_small, "Swipe away this app to stop streaming", y, color_darkgray);
 
     SDL_Flip(screen);
 }
@@ -253,6 +246,18 @@ int main(int argc, char *argv[]) {
         font_small = TTF_OpenFont("/usr/share/fonts/Prelude-Medium.ttf", FONT_SIZE_SMALL);
     }
 
+    /* Load the status-screen icon. Optional: if it fails to load the layout
+     * simply omits it rather than failing to start. Converted to the display
+     * format up front so the per-frame blit does not re-convert, and so the
+     * PNG's alpha composites against the dark background. */
+    SDL_Surface *icon_raw = IMG_Load(STATUS_ICON_PATH);
+    if (icon_raw) {
+        icon_surface = SDL_DisplayFormatAlpha(icon_raw);
+        SDL_FreeSurface(icon_raw);
+    } else {
+        fprintf(stderr, "Icon load failed (%s): %s\n", STATUS_ICON_PATH, IMG_GetError());
+    }
+
     /* Set custom pause handling - we want to keep running when minimized */
     PDL_CustomPauseUiEnable(PDL_TRUE);
 
@@ -280,16 +285,6 @@ int main(int argc, char *argv[]) {
                     }
                     break;
 
-                case SDL_MOUSEBUTTONDOWN:
-                    /* Check if touch is on the Clear Buffer button */
-                    if (event.button.x >= BUTTON_X &&
-                        event.button.x <= BUTTON_X + BUTTON_W &&
-                        event.button.y >= BUTTON_Y &&
-                        event.button.y <= BUTTON_Y + BUTTON_H) {
-                        /* Trigger clear buffer mode for 2 seconds */
-                        clear_buffer_until = SDL_GetTicks() + 2000;
-                    }
-                    break;
             }
         }
 
@@ -307,6 +302,7 @@ int main(int argc, char *argv[]) {
     /* Cleanup */
     stop_daemon();
 
+    if (icon_surface) SDL_FreeSurface(icon_surface);
     if (font_large) TTF_CloseFont(font_large);
     if (font_medium) TTF_CloseFont(font_medium);
     if (font_small) TTF_CloseFont(font_small);
