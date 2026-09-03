@@ -146,6 +146,24 @@ def stream_fetcher(quality: int, interval_ms: int, fast_dct: bool = False):
             pass
 
 
+def send_tap(x: int, y: int) -> bool:
+    """Forward a tap to the device's hidd inject plugin.
+
+    Spawns a short novacom run per tap. novacom is nominally single-session and
+    the frame stream holds one open, so this contends briefly - acceptable at
+    human click rates, but it is the reason this is not wired into the normal
+    flow yet. Moving taps onto the existing stream pipe (fbcapture reading
+    stdin) would remove the contention entirely.
+    """
+    try:
+        r = subprocess.run(
+            ["novacom", "run", f"file://{DEVICE_TAPSEND}", "--", "0", str(x), str(y)],
+            capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def publish_host_capture(enable: bool):
     """Claim (or release) capture ownership so the device app does not also run
     a daemon. The app polls this file once a second."""
@@ -212,6 +230,29 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
         """Suppress default logging"""
         pass
 
+    def do_POST(self):
+        """EXPERIMENTAL tap injection. Only live with --enable-input."""
+        if self.path != '/input' or not INPUT_ENABLED:
+            self.send_error(404)
+            return
+        try:
+            n = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(n) if n else b'{}'
+            import json as _json
+            d = _json.loads(body.decode('utf-8'))
+            x, y = int(d['x']), int(d['y'])
+        except Exception:
+            self.send_error(400)
+            return
+        # Clamp to the panel: a click on the letterboxed edge of a scaled
+        # image can round just outside 1024x768.
+        x = max(0, min(1023, x))
+        y = max(0, min(767, y))
+        ok = send_tap(x, y)
+        self.send_response(204 if ok else 502)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
     def do_GET(self):
         if self.path == '/':
             self.serve_index()
@@ -258,14 +299,44 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
 </head>
 <body>
     <h1>LuneCast</h1>
-    <img src="/stream" alt="webOS Screen">
+    <img id="screen" src="/stream" alt="webOS Screen">
     <div class="info">
         <p>Stream URL: <a href="/stream">/stream</a> (for VLC, ffplay, etc.)</p>
         <p>Snapshot: <a href="/snapshot">/snapshot</a></p>
         <p>Status: <a href="/status">/status</a></p>
     </div>
+__INPUT_JS__
 </body>
 </html>"""
+
+        # EXPERIMENTAL: only wire up clicks when input injection is enabled, so
+        # the default page is unchanged for everyone else.
+        if INPUT_ENABLED:
+            html = html.replace(b'__INPUT_JS__', b"""    <div class="info" style="color:#4af">
+      Input enabled - click the screen to tap the device (experimental)
+    </div>
+    <script>
+    (function () {
+      var img = document.getElementById('screen');
+      img.style.cursor = 'crosshair';
+      img.addEventListener('click', function (e) {
+        // The image is scaled to fit the window, so map the click from
+        // displayed pixels back to the panel's own 1024x768 coordinates.
+        var r = img.getBoundingClientRect();
+        var nw = img.naturalWidth || 1024, nh = img.naturalHeight || 768;
+        var x = Math.round((e.clientX - r.left) * nw / r.width);
+        var y = Math.round((e.clientY - r.top) * nh / r.height);
+        fetch('/input', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({x: x, y: y})
+        });
+      });
+    })();
+    </script>""")
+        else:
+            html = html.replace(b'__INPUT_JS__', b'')
+
         self.send_response(200)
         self.send_header('Content-Type', 'text/html')
         self.send_header('Content-Length', len(html))
@@ -395,6 +466,13 @@ _fps_line_active = False   # an in-place "Fetch FPS" line is awaiting a newline
 
 DEVICE_PORT_FILE = "/media/internal/lunecast-port.txt"
 DEVICE_HOST_FILE = "/media/internal/lunecast-host.txt"
+DEVICE_TAPSEND = "/media/internal/tapsend"
+
+# EXPERIMENTAL, off unless --enable-input. Touch injection needs a custom hidd
+# plugin installed on the device (see docs/remote-input.md); without it the
+# tapsend helper is simply absent and taps no-op. Deliberately not advertised
+# in the CLI banner or the device's on-screen instructions yet.
+INPUT_ENABLED = False
 DEVICE_APP_DIR = "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.lunecast"
 STREAM_MAGIC = b"LCF1"
 PORT_SCAN_SPAN = 20
@@ -541,6 +619,9 @@ def main():
                        help='Low latency mode: quality=30, fps=20')
     parser.add_argument('--force-daemon', action='store_true',
                        help="Force start/stop daemon on device (default: let device app manage it)")
+    parser.add_argument('--enable-input', action='store_true',
+                       help='EXPERIMENTAL: click the viewer page to tap the device. '
+                            'Requires the hidd inject plugin installed on the device.')
     parser.add_argument('--fast-dct', action='store_true',
                        help='Faster, less accurate DCT (~15ms/frame). Can ring on text edges.')
     parser.add_argument('--transport', default='stream', choices=['stream', 'file'],
@@ -579,6 +660,9 @@ def main():
 
     # Start frame fetcher thread
     print(f"Starting frame fetcher (target: {args.fps} FPS)...")
+    global INPUT_ENABLED
+    INPUT_ENABLED = args.enable_input
+
     if args.transport == 'stream':
         # Claim capture first, then give the device app a moment to notice and
         # shut its own daemon down - otherwise both capture for a second or two
