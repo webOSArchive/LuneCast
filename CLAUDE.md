@@ -192,7 +192,10 @@ the server is listening, on a 1s timer so the request lands after
 `serve_forever()` is accepting. On Linux with no `DISPLAY`/`WAYLAND_DISPLAY`
 it prints the URL instead of trying.
 
-The browser is pointed at the viewer PAGE (`/`), not `/stream`.
+The browser is pointed at the viewer PAGE (`/`), not `/stream` - and so is
+the device's own on-screen instruction. The server prints the URL to open
+manually AND says it is launching a viewer, so a failed launch still leaves
+the user knowing what to do.
 
 ### Browser support for the MJPEG stream
 

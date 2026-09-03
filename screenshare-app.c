@@ -236,7 +236,11 @@ static void render_screen(SDL_Surface *screen, TTF_Font *font_large,
     y += 34;
 
     char stream_url[64];
-    snprintf(stream_url, sizeof(stream_url), "http://localhost:%d/stream", g_stream_port);
+    /* Point at the viewer PAGE, not /stream. The page is an ordinary HTML
+     * document embedding <img src="/stream">, so only the img needs
+     * multipart/x-mixed-replace support - the most widely compatible way to
+     * consume it across browsers. */
+    snprintf(stream_url, sizeof(stream_url), "http://localhost:%d/", g_stream_port);
     render_text_centered(screen, font_medium, stream_url, y, color_white);
     y += 46;
 

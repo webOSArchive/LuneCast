@@ -233,11 +233,11 @@ def open_viewer(port: int, open_with: str):
     Fires on a short timer so the request lands after serve_forever() is
     actually accepting.
     """
-    if open_with == 'none':
-        return
-
     page_url = f"http://localhost:{port}/"
     stream_url = f"http://localhost:{port}/stream"
+
+    if open_with == 'none':
+        return
 
     # No GUI (ssh session, headless box) - opening anything is pointless.
     if (sys.platform.startswith('linux')
@@ -245,6 +245,11 @@ def open_viewer(port: int, open_with: str):
             and not os.environ.get('WAYLAND_DISPLAY')):
         print(f"No display detected - open {page_url} yourself.")
         return
+
+    target = page_url if open_with == 'browser' else stream_url
+    friendly = {'browser': 'your default browser', 'vlc': 'VLC', 'ffplay': 'ffplay'}[open_with]
+    print(f"Opening {target} in {friendly} now...")
+    print("  (if that does not work, open the URL above yourself)\n")
 
     def launch():
         try:
@@ -480,15 +485,13 @@ def main():
     print(f"\n{'='*60}")
     print(f"LuneCast Server (quality={args.quality}, fps={args.fps})")
     print(f"{'='*60}")
-    print(f"Web viewer:  http://localhost:{port}/")
-    print(f"MJPEG stream: http://localhost:{port}/stream")
+    print(f"OPEN THE STREAM AT:  http://localhost:{port}/")
     print(f"")
-    print(f"LOWEST LATENCY (recommended):")
-    print(f"  ffplay -fflags nobuffer -flags low_delay -framedrop \\")
-    print(f"         http://localhost:{port}/stream")
-    print(f"")
-    print(f"VLC (add low caching):")
-    print(f"  vlc --network-caching=50 http://localhost:{port}/stream")
+    print(f"Other ways to view it:")
+    print(f"  Direct MJPEG stream:  http://localhost:{port}/stream")
+    print(f"  Lowest latency:       ffplay -fflags nobuffer -flags low_delay -framedrop \\")
+    print(f"                                http://localhost:{port}/stream")
+    print(f"  VLC:                  vlc --network-caching=50 http://localhost:{port}/stream")
     print(f"{'='*60}")
     print(f"Press Ctrl+C to stop\n")
 
