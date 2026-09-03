@@ -2,6 +2,8 @@
 
 Share your HP TouchPad's screen with your computer over USB.
 
+![Screenshot](screenshot.png)
+
 ## Features
 
 - **Cross-platform viewer** - Works with VLC, ffplay, or any browser
