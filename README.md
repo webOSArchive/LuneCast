@@ -11,6 +11,7 @@ Share your HP TouchPad's screen with your computer over USB.
 - **No network required** - Everything works over USB via novacom
 - **Automatic port negotiation** - If 8080 is taken on the host, the server
   picks another and tells the device, which updates its on-screen instructions
+- **Auto-opens a viewer** - `--open browser|vlc|ffplay|none` (default browser)
 
 ## Quick Start
 

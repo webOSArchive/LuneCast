@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from typing import Optional
 
 # Global state
@@ -220,6 +221,50 @@ class MJPEGHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def open_viewer(port: int, open_with: str):
+    """Open a viewer once the server is listening.
+
+    The browser gets the viewer PAGE (/), not the raw /stream endpoint. Both
+    render in Chromium and Firefox, but the page is the safer target: it is an
+    ordinary HTML document embedding <img src="/stream">, which is the most
+    widely supported way to consume multipart/x-mixed-replace, and it gives
+    the user something with a title and a URL bar they can bookmark.
+
+    Fires on a short timer so the request lands after serve_forever() is
+    actually accepting.
+    """
+    if open_with == 'none':
+        return
+
+    page_url = f"http://localhost:{port}/"
+    stream_url = f"http://localhost:{port}/stream"
+
+    # No GUI (ssh session, headless box) - opening anything is pointless.
+    if (sys.platform.startswith('linux')
+            and not os.environ.get('DISPLAY')
+            and not os.environ.get('WAYLAND_DISPLAY')):
+        print(f"No display detected - open {page_url} yourself.")
+        return
+
+    def launch():
+        try:
+            if open_with == 'browser':
+                webbrowser.open(page_url)
+            elif open_with == 'vlc':
+                subprocess.Popen(['vlc', '--network-caching=50', stream_url],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif open_with == 'ffplay':
+                subprocess.Popen(['ffplay', '-fflags', 'nobuffer', '-flags', 'low_delay',
+                                  '-framedrop', stream_url],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            print(f"Could not launch '{open_with}' - open {page_url} yourself.")
+        except Exception as exc:
+            print(f"Could not open viewer ({exc}) - open {page_url} yourself.")
+
+    threading.Timer(1.0, launch).start()
+
+
 DEVICE_PORT_FILE = "/media/internal/lunecast-port.txt"
 PORT_SCAN_SPAN = 20
 
@@ -365,6 +410,9 @@ def main():
                        help='Low latency mode: quality=30, fps=20')
     parser.add_argument('--force-daemon', action='store_true',
                        help="Force start/stop daemon on device (default: let device app manage it)")
+    parser.add_argument('--open', dest='open_with', default='browser',
+                       choices=['browser', 'vlc', 'ffplay', 'none'],
+                       help='Viewer to open automatically once the server is up (default: browser)')
     args = parser.parse_args()
 
     # Apply low-latency mode settings
@@ -443,6 +491,8 @@ def main():
     print(f"  vlc --network-caching=50 http://localhost:{port}/stream")
     print(f"{'='*60}")
     print(f"Press Ctrl+C to stop\n")
+
+    open_viewer(port, args.open_with)
 
     try:
         server.serve_forever()

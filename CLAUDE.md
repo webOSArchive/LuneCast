@@ -185,6 +185,35 @@ common culprit). The server resolves this and tells the device:
 Caveat: if the server is killed uncleanly the file is left behind, and the
 app will advertise a port nothing is listening on until the next run.
 
+### Auto-opening a viewer
+
+`--open {browser,vlc,ffplay,none}` (default `browser`) launches a viewer once
+the server is listening, on a 1s timer so the request lands after
+`serve_forever()` is accepting. On Linux with no `DISPLAY`/`WAYLAND_DISPLAY`
+it prints the URL instead of trying.
+
+The browser is pointed at the viewer PAGE (`/`), not `/stream`.
+
+### Browser support for the MJPEG stream
+
+The stream is `multipart/x-mixed-replace`. Measured here against a synthetic
+MJPEG server, screenshotting a real browser:
+
+| Engine | `/` (img embed) | `/stream` (top-level) |
+|--------|-----------------|-----------------------|
+| Chromium (tested with Edge) | works | works |
+| Firefox | works (user-confirmed) | not tested - see below |
+| WebKit/Safari | not tested (no macOS here) | not tested |
+
+So it is NOT Firefox-only - the common claim that Chromium dropped top-level
+`multipart/x-mixed-replace` did not hold in this test.
+
+Testing note: headless screenshots of an endless stream only work in Chromium
+because `--virtual-time-budget` forces a render. Firefox's `--screenshot`
+waits for page load, which never completes on a stream, so it produces no
+file - inconclusive, not a failure. Prefer `/` when it matters: it is an
+ordinary HTML document, so only the `<img>` needs multipart support.
+
 ## Distribution
 
 The IPK is fully self-contained:
