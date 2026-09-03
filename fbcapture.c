@@ -120,6 +120,7 @@ static long long g_last_sent_ms = 0;
 static int g_fb1_fd = -1;  /* Global fb1 file descriptor for overlay state checks */
 static int g_use_overlay = 1;  /* Whether to composite fb1 overlay (0=fb0 only) */
 static int g_stream_mode = 0;  /* -S: emit framed JPEGs on stdout instead of files */
+static int g_fast_dct = 0;     /* -F: trade DCT accuracy for ~15ms/frame */
 
 static void signal_handler(int sig) {
     (void)sig;
@@ -318,10 +319,11 @@ static void encode_jpeg(FILE *out, unsigned char *rgb,
     jpeg_set_quality(&cinfo, quality, TRUE);
 
     /* This is a 2011 libjpeg62 with no NEON/SIMD path, and the DCT dominates
-     * encode time on this Cortex-A8. JDCT_IFAST is a slightly less accurate
-     * integer DCT that is measurably faster; at the quality levels used for
-     * screen streaming the difference is not visible. */
-    cinfo.dct_method = JDCT_IFAST;
+     * encode time on this Cortex-A8. JDCT_IFAST saves roughly 15ms a frame,
+     * but it is an approximation and rings on hard edges - which is most of
+     * what a screen capture contains, text especially. Accuracy wins by
+     * default here; -F opts into the faster transform. */
+    cinfo.dct_method = g_fast_dct ? JDCT_IFAST : JDCT_ISLOW;
 
     jpeg_start_compress(&cinfo, TRUE);
 
@@ -555,6 +557,7 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -1         Single capture and exit (default)\n");
     fprintf(stderr, "  -T         Print per-stage timings to stderr\n");
     fprintf(stderr, "  -S         Stream framed JPEGs on stdout (implies -d)\n");
+    fprintf(stderr, "  -F         Faster, less accurate DCT (~15ms/frame)\n");
     fprintf(stderr, "  -h         Show this help\n");
     fprintf(stderr, "\nBy default captures fb0+fb1 for fullscreen app support.\n");
     fprintf(stderr, "Use -0 to capture launcher/app switcher (disables fb1 overlay).\n");
@@ -575,7 +578,7 @@ int main(int argc, char *argv[]) {
     int interval_ms = DEFAULT_INTERVAL;
     int opt;
 
-    while ((opt = getopt(argc, argv, "o:q:dDi:p:01hTS")) != -1) {
+    while ((opt = getopt(argc, argv, "o:q:dDi:p:01hTSF")) != -1) {
         switch (opt) {
             case 'o':
                 output = optarg;
@@ -609,6 +612,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'T':
                 g_timing = 1;
+                break;
+            case 'F':
+                g_fast_dct = 1;
                 break;
             case 'S':
                 /* Stream mode implies continuous capture. */

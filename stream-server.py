@@ -65,7 +65,7 @@ def _read_exact(pipe, n):
     return b"".join(chunks)
 
 
-def stream_fetcher(quality: int, interval_ms: int):
+def stream_fetcher(quality: int, interval_ms: int, fast_dct: bool = False):
     """Read framed JPEGs from ONE persistent `novacom run ... -S`.
 
     The file transport spawned a fresh `novacom get` per frame - roughly 53ms
@@ -80,6 +80,8 @@ def stream_fetcher(quality: int, interval_ms: int):
 
     cmd = ["novacom", "run", f"file://{DEVICE_APP_DIR}/fbcapture", "--",
            "-S", "-i", str(interval_ms), "-q", str(quality)]
+    if fast_dct:
+        cmd.append("-F")
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL, bufsize=0)
@@ -532,12 +534,14 @@ def main():
                        help='HTTP port (default: 8080)')
     parser.add_argument('--fps', '-f', type=int, default=15,
                        help='Target FPS (default: 15)')
-    parser.add_argument('--quality', '-q', type=int, default=50,
-                       help='JPEG quality 1-100 (default: 50)')
+    parser.add_argument('--quality', '-q', type=int, default=75,
+                       help='JPEG quality 1-100 (default: 75, matching the device app)')
     parser.add_argument('--low-latency', '-l', action='store_true',
                        help='Low latency mode: quality=30, fps=20')
     parser.add_argument('--force-daemon', action='store_true',
                        help="Force start/stop daemon on device (default: let device app manage it)")
+    parser.add_argument('--fast-dct', action='store_true',
+                       help='Faster, less accurate DCT (~15ms/frame). Can ring on text edges.')
     parser.add_argument('--transport', default='stream', choices=['stream', 'file'],
                        help='stream: one persistent novacom pipe (default). '
                             'file: legacy per-frame novacom get')
@@ -583,7 +587,7 @@ def main():
         time.sleep(1.5)
         interval_ms = max(20, int(1000 / args.fps))
         fetcher_thread = threading.Thread(
-            target=stream_fetcher, args=(args.quality, interval_ms), daemon=True)
+            target=stream_fetcher, args=(args.quality, interval_ms, args.fast_dct), daemon=True)
     else:
         fetcher_thread = threading.Thread(target=frame_fetcher, args=(args.fps,), daemon=True)
     fetcher_thread.start()
