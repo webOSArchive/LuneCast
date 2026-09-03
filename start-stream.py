@@ -147,17 +147,20 @@ def stream_fetcher(quality: int, interval_ms: int, fast_dct: bool = False):
 
 
 def send_tap(x: int, y: int) -> bool:
-    """Forward a tap to the device's hidd inject plugin.
+    """Forward a tap to the device.
+
+    lunecast-input sends the touch straight to the socket LunaSysMgr binds -
+    no system modification, and it lives in the app directory so it goes away
+    with palm-uninstall.
 
     Spawns a short novacom run per tap. novacom is nominally single-session and
     the frame stream holds one open, so this contends briefly - acceptable at
-    human click rates, but it is the reason this is not wired into the normal
-    flow yet. Moving taps onto the existing stream pipe (fbcapture reading
-    stdin) would remove the contention entirely.
+    human click rates, but it should move onto the existing stream pipe
+    (fbcapture reading stdin) before drags, which are a burst of events.
     """
     try:
         r = subprocess.run(
-            ["novacom", "run", f"file://{DEVICE_TAPSEND}", "--", "0", str(x), str(y)],
+            ["novacom", "run", f"file://{DEVICE_INPUT}", "--", str(x), str(y)],
             capture_output=True, timeout=5)
         return r.returncode == 0
     except Exception:
@@ -466,11 +469,11 @@ _fps_line_active = False   # an in-place "Fetch FPS" line is awaiting a newline
 
 DEVICE_PORT_FILE = "/media/internal/lunecast-port.txt"
 DEVICE_HOST_FILE = "/media/internal/lunecast-host.txt"
-DEVICE_TAPSEND = "/media/internal/tapsend"
+DEVICE_INPUT = f"{DEVICE_APP_DIR}/lunecast-input"
 
-# EXPERIMENTAL, off unless --enable-input. Touch injection needs a custom hidd
-# plugin installed on the device (see docs/remote-input.md); without it the
-# tapsend helper is simply absent and taps no-op. Deliberately not advertised
+# EXPERIMENTAL, off unless --enable-input. The helper ships inside the IPK and
+# talks straight to the socket LunaSysMgr binds, so nothing is installed on the
+# device and palm-uninstall removes it completely. Deliberately not advertised
 # in the CLI banner or the device's on-screen instructions yet.
 INPUT_ENABLED = False
 DEVICE_APP_DIR = "/media/cryptofs/apps/usr/palm/applications/org.webosarchive.lunecast"

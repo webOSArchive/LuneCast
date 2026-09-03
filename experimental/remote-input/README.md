@@ -1,12 +1,19 @@
-# Remote input (EXPERIMENTAL)
+# Remote input - the hidd plugin route (SUPERSEDED)
 
-Click the LuneCast viewer page and have the TouchPad receive it as a real tap.
+> **This approach is no longer used. Do not follow the install steps below.**
+>
+> `lunecast-input`, shipped in the IPK, sends touch events straight to the
+> socket LunaSysMgr binds. It needs no plugin, no file in `/usr/lib`, no edit
+> to `/etc/hidd/HidPlugins.xml` and no hidd restart, and `palm-uninstall`
+> removes it completely. Its worst failure is a tap that does nothing, rather
+> than an input daemon that crash-loops and leaves the tablet with no
+> touchscreen.
+>
+> This document is kept because the investigation below is how the wire format
+> and the CLOCK_MONOTONIC requirement were found, and because the hidd plugin
+> ABI is not documented anywhere else. The dead ends are worth knowing too.
 
-**Status: working, but off by default and not advertised anywhere in the UI.**
-It requires installing a custom plugin into the device's input daemon. Do not
-do this on a device you are not willing to re-image.
-
-Enable with:
+Enable remote input with:
 
 ```bash
 ./start-stream.py --enable-input

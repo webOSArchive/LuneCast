@@ -30,11 +30,12 @@ VERSION = 1.0.0
 # Targets
 DAEMON = fbcapture
 APP = lunecast
+INPUT = lunecast-input
 
-.PHONY: all clean strip deploy test package install help app daemon
+.PHONY: all clean strip deploy test package install help app daemon input
 
 # Build everything
-all: $(DAEMON) $(APP)
+all: $(DAEMON) $(APP) $(INPUT)
 
 # Build just the daemon
 daemon: $(DAEMON)
@@ -42,12 +43,19 @@ daemon: $(DAEMON)
 # Build just the app
 app: $(APP)
 
+# Build just the input helper (EXPERIMENTAL remote tap injection)
+input: $(INPUT)
+
 # Daemon (fbcapture)
 $(DAEMON): fbcapture.o
 	$(CC) $(LDFLAGS) -o $@ $^ -ljpeg
 
 fbcapture.o: fbcapture.c
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# Input helper - no SDL/PDK, just libc + librt for clock_gettime
+$(INPUT): lunecast-input.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< -lrt
 
 # App (lunecast)
 $(APP): screenshare-app.o
@@ -57,13 +65,13 @@ screenshare-app.o: screenshare-app.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 # Strip both binaries
-strip: $(DAEMON) $(APP)
-	$(STRIP) $(DAEMON) $(APP)
+strip: $(DAEMON) $(APP) $(INPUT)
+	$(STRIP) $(DAEMON) $(APP) $(INPUT)
 
 # Clean build artifacts
 clean:
-	rm -f *.o $(DAEMON) $(APP)
-	rm -f package/$(DAEMON) package/$(APP)
+	rm -f *.o $(DAEMON) $(APP) $(INPUT)
+	rm -f package/$(DAEMON) package/$(APP) package/$(INPUT)
 	rm -f *.ipk
 
 # Deploy daemon to /media/internal for testing
@@ -102,11 +110,12 @@ stop-daemon:
 	@echo "Daemon stopped."
 
 # Package for webOS installation
-package: $(DAEMON) $(APP) strip
+package: $(DAEMON) $(APP) $(INPUT) strip
 	@echo "Creating IPK package..."
 	@mkdir -p package
 	@cp $(DAEMON) package/
 	@cp $(APP) package/
+	@cp $(INPUT) package/
 	palm-package package -o .
 	@echo "Package created:"
 	@ls -la *.ipk
